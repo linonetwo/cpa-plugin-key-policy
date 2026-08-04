@@ -99,7 +99,7 @@ function Shell() {
   }
   return (
     <div className="app">
-      <TopNav mode={mode} />
+      {mode === "legacy" && <TopNav mode={mode} />}
       <Routes>
         <Route path="/keys" element={mode === "native-access" ? <NativeAccess /> : <KeyList />} />
         {mode === "legacy" && <Route path="/keys/new" element={<KeyNew />} />}

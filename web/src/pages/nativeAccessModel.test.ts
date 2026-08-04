@@ -9,6 +9,7 @@ import {
   nativeGroupOptions,
   nativeIdentityAlias,
   rawAPIKeyHash,
+  groupNativeGrants,
 } from "./nativeAccessModel";
 
 describe("native access display metadata", () => {
@@ -74,12 +75,12 @@ describe("native credential group suggestions", () => {
     },
   ];
 
-  it("filters catalog candidates by provider and model and includes configured rules", () => {
+  it("filters catalog candidates by provider and model without leaking unrelated classify rules", () => {
     expect(nativeGroupOptions(
       { provider: "codex", model: "gpt-5.6-sol" },
       catalog,
       rules,
-    )).toEqual(["classify:csil", "classify:legacy", "team"]);
+    )).toEqual(["classify:csil", "team"]);
   });
 
   it("keeps all provider groups searchable until a model is selected", () => {
@@ -88,5 +89,26 @@ describe("native credential group suggestions", () => {
       catalog,
       [],
     )).toEqual(["classify:csil", "free", "team"]);
+  });
+
+  it("shows no credential subgroup when a provider has no classified credentials", () => {
+    expect(nativeGroupOptions(
+      { provider: "kimi", model: "kimi-k3" },
+      catalog,
+      rules,
+    )).toEqual([]);
+  });
+});
+
+describe("native grant summaries", () => {
+  it("groups long permission lists by provider", () => {
+    expect(groupNativeGrants([
+      { provider: "kimi", model: "kimi-k3" },
+      { provider: "codex", model: "gpt-5.6-sol" },
+      { provider: "kimi", model: "kimi-k2.7-code" },
+    ])).toEqual([
+      { provider: "codex", indexes: [1] },
+      { provider: "kimi", indexes: [0, 2] },
+    ]);
   });
 });

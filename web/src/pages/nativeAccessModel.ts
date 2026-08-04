@@ -7,7 +7,6 @@ import type {
 } from "../types";
 
 const SHA256_PREFIX = "sha256:";
-const CLASSIFY_PREFIX = "classify:";
 
 export function rawAPIKeyHash(keyHash: string): string {
   const normalized = keyHash.trim().toLowerCase();
@@ -28,23 +27,15 @@ export function nativeIdentityAlias(
   )?.alias.trim() ?? "";
 }
 
-function classifyGroup(group: string): string {
-  const normalized = group.trim().toLowerCase();
-  if (!normalized) return "";
-  return normalized.startsWith(CLASSIFY_PREFIX)
-    ? normalized
-    : CLASSIFY_PREFIX + normalized;
-}
-
 // Suggestions are constrained by the selected provider/model when catalog
-// metadata is available. Enabled configured classify groups are also offered
-// so an administrator can select a valid group before a matching credential
-// happens to expose models in the catalog. The input remains a datalist-backed
-// free-text field, so new/manual groups are still accepted.
+// metadata is available. Rules that belong to another provider are not offered:
+// an empty group already means "all credentials for this provider", while a
+// classify group is meaningful only after the catalog confirms a matching
+// credential. The input remains datalist-backed so manual values are accepted.
 export function nativeGroupOptions(
   grant: NativeGrant,
   catalog: CatalogModel[],
-  rules: ClassifyRule[],
+  _rules: ClassifyRule[],
 ): string[] {
   const provider = grant.provider.trim().toLowerCase();
   const model = grant.model.trim().toLowerCase();
@@ -56,11 +47,22 @@ export function nativeGroupOptions(
     if (model && item.model.toLowerCase() !== model) continue;
     groups.add(item.group.trim().toLowerCase());
   }
-  for (const rule of rules) {
-    if (!rule.enabled) continue;
-    const group = classifyGroup(rule.group);
-    if (group) groups.add(group);
-  }
-
   return Array.from(groups).sort((a, b) => a.localeCompare(b));
+}
+
+export interface NativeGrantGroup {
+  provider: string;
+  indexes: number[];
+}
+
+export function groupNativeGrants(grants: NativeGrant[]): NativeGrantGroup[] {
+  const groups = new Map<string, number[]>();
+  grants.forEach((grant, index) => {
+    const provider = grant.provider.trim() || "*";
+    const indexes = groups.get(provider) ?? [];
+    indexes.push(index);
+    groups.set(provider, indexes);
+  });
+  return Array.from(groups, ([provider, indexes]) => ({ provider, indexes }))
+    .sort((left, right) => left.provider.localeCompare(right.provider));
 }

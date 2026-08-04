@@ -16,7 +16,11 @@ import type {
   NativePolicy,
 } from "../types";
 import { useT } from "../i18n";
-import { nativeGroupOptions, nativeIdentityAlias } from "./nativeAccessModel";
+import {
+  groupNativeGrants,
+  nativeGroupOptions,
+  nativeIdentityAlias,
+} from "./nativeAccessModel";
 
 const emptyGrant = (): NativeGrant => ({ provider: "", model: "" });
 const numberValue = (value: string): number => {
@@ -127,14 +131,32 @@ export default function NativeAccess() {
                     <span className="badge">{t("native.unmanaged")}</span>
                   )}
                 </div>
-                <div className="chip-row">
-                  {(policy?.grants ?? []).map((grant, index) => (
-                    <span className="chip" key={`${grant.provider}-${grant.model}-${index}`}>
-                      {grant.provider} · {grant.model}
-                    </span>
-                  ))}
+                {policy && (
+                  <details className="native-grant-summary">
+                    <summary>
+                      <span>{t("native.ruleCount", { n: policy.grants.length })}</span>
+                      <span className="chip-row compact">
+                        {groupNativeGrants(policy.grants).map((group) => (
+                          <span className="chip" key={group.provider}>
+                            {group.provider} · {group.indexes.length}
+                          </span>
+                        ))}
+                      </span>
+                    </summary>
+                    <div className="native-grant-list">
+                      {policy.grants.map((grant, index) => (
+                        <div className="native-grant-line" key={`${grant.provider}-${grant.model}-${index}`}>
+                          <strong>{grant.provider}</strong>
+                          <span>{grant.model}</span>
+                          {grant.group && <span className="muted">{grant.group.replace(/^classify:/, "")}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                <div className="native-card-actions">
+                  <button className="btn sm" onClick={() => edit(identity)}>{t("native.edit")}</button>
                 </div>
-                <button className="btn sm" onClick={() => edit(identity)}>{t("native.edit")}</button>
               </div>
             );
           })}
@@ -170,6 +192,7 @@ function NativePolicyEditor({
   const [policy, setPolicy] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const grantGroups = groupNativeGrants(policy.grants);
   const updateGrant = (index: number, patch: Partial<NativeGrant>) => {
     setPolicy((current) => ({
       ...current,
@@ -215,50 +238,96 @@ function NativePolicyEditor({
   );
   return (
     <div className="modal-overlay">
-      <div className="modal" style={{ maxWidth: 900 }}>
-        <h2>{t("native.editTitle")}</h2>
-        <div className="muted mono">{initial.key_hash.slice(0, 24)}…</div>
-        <label className="native-check">
-          <input
-            type="checkbox"
-            role="switch"
-            checked={policy.enabled}
-            onChange={(event) => setPolicy({ ...policy, enabled: event.target.checked })}
-          />
-          {t("native.enabled")}
-        </label>
-        <div className="muted">{t("native.upstreamOpaqueHint")}</div>
-        {policy.grants.map((grant, index) => (
-          <div className="card" key={index} style={{ marginTop: 10 }}>
-            <div className="form-grid two">
-              <input className="input" list={`native-providers-${index}`} value={grant.provider} placeholder={t("native.provider")} onChange={(e) => updateGrant(index, { provider: e.target.value })} />
-              <datalist id={`native-providers-${index}`}>
-                <option value="*" />
-                {[...new Set(catalog.map((item) => item.provider))].map((provider) => <option value={provider} key={provider} />)}
-              </datalist>
-              <input className="input" list={`native-models-${index}`} value={grant.model} placeholder={t("native.model")} onChange={(e) => updateGrant(index, { model: e.target.value })} />
-              <datalist id={`native-models-${index}`}>
-                {[...new Set(catalog.filter((item) => grant.provider === "*" || item.provider === grant.provider).map((item) => item.model))].map((model) => <option value={model} key={model} />)}
-              </datalist>
-              <input className="input" list={`native-groups-${index}`} value={grant.group ?? ""} placeholder={t("native.group")} onChange={(e) => updateGrant(index, { group: e.target.value || undefined })} />
-              <datalist id={`native-groups-${index}`}>
-                {nativeGroupOptions(grant, catalog, classifyRules).map((group) => <option value={group} key={group} />)}
-              </datalist>
-            </div>
-            <button className="btn sm danger-outline" onClick={() => setPolicy({ ...policy, grants: policy.grants.filter((_, i) => i !== index) })}>{t("keys.delete")}</button>
+      <div className="modal native-policy-modal">
+        <div className="modal-header">
+          <div>
+            <h2>{t("native.editTitle")}</h2>
+            <div className="muted mono">{initial.key_hash.slice(0, 24)}…</div>
           </div>
-        ))}
-        <button className="btn sm" onClick={() => setPolicy({ ...policy, grants: [...policy.grants, emptyGrant()] })}>+ {t("native.addGrant")}</button>
-        <div className="form-grid two" style={{ marginTop: 16 }}>
-          {quota("rpm", t("native.rpm"))}
-          {quota("daily_calls", t("native.dailyCalls"))}
-          {quota("weekly_calls", t("native.weeklyCalls"))}
-          {quota("daily_tokens", t("native.dailyTokens"))}
-          {quota("weekly_tokens", t("native.weeklyTokens"))}
+          <label className="switch">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={policy.enabled}
+              onChange={(event) => setPolicy({ ...policy, enabled: event.target.checked })}
+            />
+            <span className="track"><span className="thumb" /></span>
+            <span>{t("native.enabled")}</span>
+          </label>
         </div>
-        <div className="muted">{t("native.zeroUnlimited")}</div>
-        {error && <div className="error">{error}</div>}
-        <div className="modal-actions">
+        <div className="modal-body">
+          <div className="muted native-policy-hint">{t("native.upstreamOpaqueHint")}</div>
+          <div className="native-rule-toolbar">
+            <strong>{t("native.ruleCount", { n: policy.grants.length })}</strong>
+            <button className="btn sm" onClick={() => setPolicy({ ...policy, grants: [...policy.grants, emptyGrant()] })}>+ {t("native.addGrant")}</button>
+          </div>
+          <div className="native-rule-groups">
+            {grantGroups.map((group) => (
+              <details className="native-rule-group" key={group.provider} open>
+                <summary>
+                  <strong>{group.provider}</strong>
+                  <span className="badge">{group.indexes.length}</span>
+                </summary>
+                {group.indexes.map((index) => {
+                  const grant = policy.grants[index];
+                  const groupOptions = nativeGroupOptions(grant, catalog, classifyRules);
+                  return (
+                    <div className="native-rule-row" key={index}>
+                      <div className="form-grid native-rule-fields">
+                        <label>
+                          <span>{t("native.provider")}</span>
+                          <input className="input" list={`native-providers-${index}`} value={grant.provider} onChange={(e) => updateGrant(index, { provider: e.target.value })} />
+                        </label>
+                        <datalist id={`native-providers-${index}`}>
+                          <option value="*" />
+                          {[...new Set(catalog.map((item) => item.provider))].map((provider) => <option value={provider} key={provider} />)}
+                        </datalist>
+                        <label>
+                          <span>{t("native.model")}</span>
+                          <input className="input" list={`native-models-${index}`} value={grant.model} onChange={(e) => updateGrant(index, { model: e.target.value })} />
+                        </label>
+                        <datalist id={`native-models-${index}`}>
+                          {[...new Set(catalog.filter((item) => grant.provider === "*" || item.provider === grant.provider).map((item) => item.model))].map((model) => <option value={model} key={model} />)}
+                        </datalist>
+                        <label>
+                          <span>{t("native.groupScope")}</span>
+                          <input
+                            className="input"
+                            list={`native-groups-${index}`}
+                            value={grant.group ?? ""}
+                            placeholder={groupOptions.length ? t("native.groupOptional") : t("native.groupAll", { provider: grant.provider || t("native.providerAny") })}
+                            onChange={(e) => updateGrant(index, { group: e.target.value || undefined })}
+                          />
+                        </label>
+                        <datalist id={`native-groups-${index}`}>
+                          {groupOptions.map((groupName) => (
+                            <option value={groupName} label={groupName.replace(/^classify:/, "")} key={groupName} />
+                          ))}
+                        </datalist>
+                      </div>
+                      <button
+                        className="btn sm danger-outline native-rule-delete"
+                        onClick={() => setPolicy({ ...policy, grants: policy.grants.filter((_, i) => i !== index) })}
+                      >
+                        {t("keys.delete")}
+                      </button>
+                    </div>
+                  );
+                })}
+              </details>
+            ))}
+          </div>
+          <div className="form-grid two native-quotas">
+            {quota("rpm", t("native.rpm"))}
+            {quota("daily_calls", t("native.dailyCalls"))}
+            {quota("weekly_calls", t("native.weeklyCalls"))}
+            {quota("daily_tokens", t("native.dailyTokens"))}
+            {quota("weekly_tokens", t("native.weeklyTokens"))}
+          </div>
+          <div className="muted">{t("native.zeroUnlimited")}</div>
+          {error && <div className="error">{error}</div>}
+        </div>
+        <div className="modal-actions modal-footer">
           <button className="btn" onClick={onClose} disabled={saving}>{t("mapping.cancel")}</button>
           <button className="btn primary" onClick={() => void save()} disabled={saving}>{t("mapping.save")}</button>
         </div>

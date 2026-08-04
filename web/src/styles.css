@@ -321,9 +321,71 @@ td .mono, .mono { font-family: "Courier Prime", ui-monospace, Consolas, "Courier
 }
 .badge.success { color: var(--success); border-color: var(--success); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.native-card-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+.native-grant-summary {
+  margin-top: 12px; border: 1px solid var(--border); border-radius: var(--r-md);
+  background: var(--bg);
+}
+.native-grant-summary > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  cursor: pointer; padding: 10px 12px; font-size: 13px; font-weight: 600;
+}
+.native-grant-summary > summary::marker { color: var(--muted); }
+.chip-row.compact { margin: 0; justify-content: flex-end; }
+.native-grant-list { border-top: 1px solid var(--border); padding: 8px 12px; max-height: 220px; overflow: auto; }
+.native-grant-line {
+  display: grid; grid-template-columns: minmax(100px, .6fr) minmax(180px, 1fr) minmax(80px, .5fr);
+  gap: 10px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.native-grant-line:last-child { border-bottom: 0; }
+.native-policy-modal {
+  max-width: 980px; padding: 0; overflow: hidden; display: flex; flex-direction: column;
+}
+.modal-header, .modal-footer {
+  flex: 0 0 auto; padding: 18px 22px; background: var(--panel); z-index: 1;
+}
+.modal-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-header h2 { margin: 0 0 4px; font-size: 20px; }
+.modal-body { min-height: 0; overflow: auto; padding: 18px 22px 24px; }
+.modal-footer {
+  margin-top: 0; border-top: 1px solid var(--border);
+  box-shadow: 0 -8px 18px rgb(0 0 0 / 0.04);
+}
+.native-policy-hint { margin-bottom: 16px; }
+.native-rule-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin: 2px 0 14px;
+}
+.native-rule-groups { display: flex; flex-direction: column; gap: 12px; }
+.native-rule-group {
+  border: 1px solid var(--border); border-radius: var(--r-md); overflow: hidden; background: var(--panel);
+}
+.native-rule-group > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 10px 14px; background: var(--panel-2);
+}
+.native-rule-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px;
+  align-items: end; padding: 12px 14px; border-top: 1px solid var(--border);
+}
+.native-rule-fields { grid-template-columns: .75fr 1fr 1fr; }
+.native-rule-fields label { display: flex; flex-direction: column; gap: 5px; min-width: 0; font-size: 12px; color: var(--muted); }
+.native-rule-delete { margin-bottom: 1px; }
+.native-quotas { margin-top: 20px; }
 
 @media (max-width: 640px) {
   .native-grid, .form-grid.two { grid-template-columns: 1fr; }
+  .native-grant-summary > summary { align-items: flex-start; flex-direction: column; }
+  .chip-row.compact { justify-content: flex-start; }
+  .native-grant-line { grid-template-columns: 1fr; gap: 2px; }
+  .modal-header { align-items: flex-start; flex-direction: column; }
+  .native-rule-row { grid-template-columns: 1fr; }
+  .native-rule-fields { grid-template-columns: 1fr; }
+  .native-rule-delete { justify-self: end; }
 }
 
 /* Inline toggle (KeyForm enabled checkbox) — styled like panel .switch */
