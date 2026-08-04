@@ -1,6 +1,6 @@
 {
   "header": {
-    "title": "cpa-key-policy 管理面板",
+    "title": "密钥权限管理",
     "keyList": "Key 列表",
     "newKey": "新建 Key",
     "mapping": "映射",
@@ -22,6 +22,26 @@
   "session": {
     "restoring": "正在从面板恢复会话…"
   },
+  "native": {
+    "title": "密钥权限",
+    "identityHint": "身份直接来自 CPA api-keys；插件只维护权限与额度，不签发第二把 Key。",
+    "unmanaged": "未配置策略",
+    "edit": "权限与额度",
+    "editTitle": "编辑密钥权限",
+    "enabled": "允许此 Key 发起请求",
+    "provider": "提供商（支持 *）",
+    "model": "规范模型（支持 * 和 ?）",
+    "group": "凭证组（例如 classify:csil）",
+    "upstreamOpaqueHint": "客户端始终使用规范模型名。上游凭证由此处的提供商和凭证组在服务端筛选，客户端不能通过前缀指定上游。",
+    "addGrant": "添加权限",
+    "grantRequired": "至少需要一条完整权限",
+    "rpm": "每分钟请求数",
+    "dailyCalls": "每日调用次数",
+    "weeklyCalls": "每周调用次数",
+    "dailyTokens": "每日 Token",
+    "weeklyTokens": "每周 Token",
+    "zeroUnlimited": "0 表示不限制。"
+  },
   "keys": {
     "newKey": "新建 Key",
     "refresh": "刷新",
@@ -38,6 +58,10 @@
     "enabled": "启用",
     "disabled": "禁用",
     "edit": "编辑",
+    "copy": "复制 Key",
+    "copyOk": "Key 已复制",
+    "copyFailed": "复制失败",
+    "copyUnavailable": "该 Key 尚未保存明文，请先轮换一次或由管理员补录",
     "resetRpm": "重置RPM",
     "rotate": "轮换",
     "delete": "删除",

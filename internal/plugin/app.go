@@ -9,14 +9,18 @@ import (
 	"strings"
 	"sync"
 
+	"cpa-key-policy/internal/nativeaccess"
 	"cpa-key-policy/internal/plugin/web"
 	"cpa-key-policy/internal/policy"
 )
 
 type App struct {
-	store         *policy.Store
-	classifyMu    sync.RWMutex
-	classifyCache map[string][]string
+	store               *policy.Store
+	native              *nativeaccess.Store
+	nativeMode          bool
+	classifyMu          sync.RWMutex
+	classifyCache       map[string][]string
+	nativeClassifyRules []policy.ClassifyRule
 }
 
 const classifyCacheCapacity = 4096
@@ -46,6 +50,8 @@ func (a *App) handleMethod(method string, request []byte) ([]byte, error) {
 		return a.authenticate(request)
 	case MethodModelRoute:
 		return a.routeModel(request)
+	case MethodModelCatalogFilter:
+		return a.filterModelCatalog(request)
 	case MethodSchedulerPick:
 		return a.pickScheduler(request)
 	case MethodResponseInterceptAfter:
@@ -82,6 +88,25 @@ func (a *App) configure(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Mode == "native-access" {
+		a.store.StopUsageFlusher()
+		native, errNative := nativeaccess.New(cfg.NativeKeysFile, cfg.NativeStateFile)
+		if errNative != nil {
+			return errNative
+		}
+		a.native = native
+		a.nativeMode = true
+		a.classifyMu.Lock()
+		a.nativeClassifyRules = append([]policy.ClassifyRule(nil), cfg.ClassifyRules...)
+		a.classifyCache = make(map[string][]string)
+		a.classifyMu.Unlock()
+		return nil
+	}
+	a.native = nil
+	a.nativeMode = false
+	a.classifyMu.Lock()
+	a.nativeClassifyRules = nil
+	a.classifyMu.Unlock()
 	if err := a.store.Configure(cfg); err != nil {
 		return err
 	}
@@ -96,36 +121,84 @@ func (a *App) configure(raw []byte) error {
 
 // Shutdown flushes usage. Host calls this on plugin unload.
 func (a *App) Shutdown() {
+	if a.native != nil {
+		a.native.Flush()
+	}
 	a.store.StopUsageFlusher()
 }
 
 func (a *App) registration() Registration {
+	capabilities := Capabilities{
+		FrontendAuthProvider:          true,
+		FrontendAuthProviderExclusive: a.nativeMode,
+		ModelRouter:                   true,
+		ModelCatalogFilter:            a.nativeMode,
+		Scheduler:                     true,
+		ResponseInterceptor:           !a.nativeMode,
+		UsagePlugin:                   true,
+		ManagementAPI:                 true,
+	}
 	return Registration{
 		SchemaVersion: SchemaVersion,
 		Metadata: Metadata{
 			Name:             PluginName,
 			Version:          Version,
-			Author:           "cpa-key-policy",
-			GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+			Author:           "linonetwo",
+			GitHubRepository: "https://github.com/linonetwo/cpa-plugin-key-policy",
 			ConfigFields: []ConfigField{
 				{Name: "enabled", Type: "boolean", Description: "Enable or disable this plugin without unloading it."},
+				{Name: "mode", Type: "string", EnumValues: []string{"legacy", "native-access"}, Description: "native-access uses CPA api-keys as the only key source and stores authorization only."},
 				{Name: "state_file", Type: "string", Description: "JSON state file used for key policy changes made through the Management API."},
+				{Name: "native_keys_file", Type: "string", Description: "CPA config.yaml containing the native api-keys list."},
+				{Name: "native_state_file", Type: "string", Description: "Authorization grants, quotas, and counters; never plaintext keys."},
 				{Name: "keys", Type: "array", Description: "Initial downstream key policy list. State file wins after it exists."},
 			},
 		},
-		Capabilities: Capabilities{
-			FrontendAuthProvider:          true,
-			FrontendAuthProviderExclusive: false,
-			ModelRouter:                   true,
-			Scheduler:                     true,
-			ResponseInterceptor:           true,
-			UsagePlugin:                   true,
-			ManagementAPI:                 true,
-		},
+		Capabilities: capabilities,
 	}
 }
 
+func (a *App) filterModelCatalog(raw []byte) ([]byte, error) {
+	if !a.nativeMode {
+		return OKEnvelope(ModelCatalogFilterResponse{Handled: false})
+	}
+	var req ModelCatalogFilterRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	rawKey := policy.ExtractAPIKey(req.Headers, req.Query)
+	models, handled := a.native.FilterModels(rawKey, req.Models, req.ModelProviders)
+	return OKEnvelope(ModelCatalogFilterResponse{Handled: handled, Models: models})
+}
+
 func (a *App) authenticate(raw []byte) ([]byte, error) {
+	if a.nativeMode {
+		var req FrontendAuthRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+		rawKey := policy.ExtractAPIKey(req.Headers, req.Query)
+		modelsEndpoint := policy.IsModelsEndpoint(req.Path)
+		requested := policy.ExtractRequestedModel(req.Path, req.Query, req.Body)
+		decision := a.native.Authenticate(rawKey, requested, modelsEndpoint)
+		if !decision.Known || !decision.Allowed {
+			return OKEnvelope(FrontendAuthResponse{Authenticated: false})
+		}
+		metadata := map[string]string{
+			"provider":        PluginID,
+			"key_hash":        decision.KeyHash,
+			"requested_model": decision.Model,
+		}
+		return OKEnvelope(FrontendAuthResponse{
+			Authenticated: true,
+			Principal:     decision.Principal,
+			Metadata:      metadata,
+		})
+	}
+	// Keep independently loaded auth instances in sync with management changes.
+	if err := a.store.RefreshFromDisk(); err != nil {
+		return nil, err
+	}
 	var req FrontendAuthRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
@@ -161,6 +234,16 @@ func (a *App) routeModel(raw []byte) ([]byte, error) {
 	var req ModelRouteRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
+	}
+	if a.nativeMode {
+		rawKey := policy.ExtractAPIKey(req.Headers, req.Query)
+		_, authorized := a.native.Route(rawKey, req.RequestedModel)
+		if !authorized {
+			return OKEnvelope(ModelRouteResponse{Handled: false})
+		}
+		// Keep the canonical client model untouched. scheduler.pick owns the
+		// server-side candidate filtering and the upstream remains invisible.
+		return OKEnvelope(ModelRouteResponse{Handled: false})
 	}
 	rule, keyID, ok := a.store.Route(req.Headers, req.Query, req.RequestedModel)
 	if !ok {
@@ -264,6 +347,9 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
+	if a.nativeMode {
+		return a.pickNativeScheduler(req)
+	}
 	group := schedulerGroupFromMetadata(req.Options.Metadata)
 	if group == "" {
 		// No tier narrowed by this downstream key → let the host pick freely.
@@ -296,6 +382,57 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 		if cand.Priority > best.Priority ||
 			(cand.Priority == best.Priority && cand.ID < best.ID) {
 			best = cand
+		}
+	}
+	return OKEnvelope(SchedulerPickResponse{Handled: true, AuthID: best.ID})
+}
+
+func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
+	keyHash := schedulerMetadataString(req.Options.Metadata, "key_hash")
+	requestedModel := schedulerMetadataString(req.Options.Metadata, "requested_model")
+	if requestedModel == "" {
+		requestedModel = strings.TrimSpace(req.Model)
+	}
+	if keyHash == "" || requestedModel == "" {
+		return OKEnvelope(SchedulerPickResponse{Handled: false})
+	}
+	grants, ok := a.native.SchedulerGrants(keyHash, requestedModel)
+	if !ok {
+		return ErrorEnvelope("auth_not_found", "cpa-key-policy: no policy grants for canonical model", http.StatusServiceUnavailable), nil
+	}
+
+	usable := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
+	eligible := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
+	for _, candidate := range req.Candidates {
+		if !schedulerCandidateUsable(candidate.Status) {
+			continue
+		}
+		usable = append(usable, candidate)
+		for _, grant := range grants {
+			if !nativeaccess.ProviderMatchesCandidate(grant.Provider, candidate.Provider) {
+				continue
+			}
+			if grant.Group != "" && !a.candidateMatchesGroup(candidate, strings.ToLower(strings.TrimSpace(grant.Group))) {
+				continue
+			}
+			eligible = append(eligible, candidate)
+			break
+		}
+	}
+	if len(eligible) == 0 {
+		return ErrorEnvelope("auth_not_found", "cpa-key-policy: no eligible auth candidate for key policy", http.StatusServiceUnavailable), nil
+	}
+	if len(eligible) == len(usable) {
+		// The policy did not remove any usable candidate. Preserve CPA's own
+		// fill-first/round-robin/priority/session-affinity behavior.
+		return OKEnvelope(SchedulerPickResponse{Handled: false})
+	}
+
+	best := eligible[0]
+	for _, candidate := range eligible[1:] {
+		if candidate.Priority > best.Priority ||
+			(candidate.Priority == best.Priority && candidate.ID < best.ID) {
+			best = candidate
 		}
 	}
 	return OKEnvelope(SchedulerPickResponse{Handled: true, AuthID: best.ID})
@@ -345,7 +482,7 @@ func (a *App) candidateGroups(cand SchedulerAuthCandidate) []string {
 	// 1. Evaluate custom classify rules (multi-group: collect all matches).
 	// Group names are stored bare on the rule but stamped/matched with the
 	// classify: prefix so they never collide with built-in plan_type values.
-	for _, rule := range a.store.ClassifyRulesSnapshot() {
+	for _, rule := range a.classifyRulesSnapshot() {
 		if !rule.Enabled || rule.Compiled() == nil {
 			continue
 		}
@@ -371,6 +508,15 @@ func (a *App) candidateGroups(cand SchedulerAuthCandidate) []string {
 	a.classifyCache[cacheKey] = groups
 	a.classifyMu.Unlock()
 	return groups
+}
+
+func (a *App) classifyRulesSnapshot() []policy.ClassifyRule {
+	if !a.nativeMode {
+		return a.store.ClassifyRulesSnapshot()
+	}
+	a.classifyMu.RLock()
+	defer a.classifyMu.RUnlock()
+	return append([]policy.ClassifyRule(nil), a.nativeClassifyRules...)
 }
 
 func (a *App) clearClassifyCache() {
@@ -437,10 +583,14 @@ func builtInGroup(cand SchedulerAuthCandidate) string {
 // schedulerGroupFromMetadata reads the group stamped at authenticate time out
 // of request-provided scheduler options. Tolerates string or any-typed values.
 func schedulerGroupFromMetadata(meta map[string]any) string {
+	return schedulerMetadataString(meta, "group")
+}
+
+func schedulerMetadataString(meta map[string]any, key string) string {
 	if meta == nil {
 		return ""
 	}
-	raw, ok := meta["group"]
+	raw, ok := meta[key]
 	if !ok || raw == nil {
 		return ""
 	}
@@ -463,6 +613,14 @@ func (a *App) handleUsage(raw []byte) ([]byte, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return OKEnvelope(UsageHandleResponse{})
 	}
+	if a.nativeMode {
+		tokens := req.Detail.TotalTokens
+		if tokens <= 0 {
+			tokens = req.Detail.InputTokens + req.Detail.OutputTokens
+		}
+		a.native.RecordUsage(req.APIKey, tokens)
+		return OKEnvelope(UsageHandleResponse{})
+	}
 	_ = a.store.RecordUsage(req.APIKey, req.Alias, req.Model, req.Failed, policy.UsageDetail{
 		InputTokens:         req.Detail.InputTokens,
 		OutputTokens:        req.Detail.OutputTokens,
@@ -477,6 +635,21 @@ func (a *App) handleUsage(raw []byte) ([]byte, error) {
 
 func (a *App) managementRegistration() ManagementRegistrationResponse {
 	base := "/plugins/" + PluginID
+	if a.nativeMode {
+		return ManagementRegistrationResponse{
+			Routes: []ManagementRoute{
+				{Method: http.MethodGet, Path: base + "/identities", Description: "List active CPA native keys by hash and policy status."},
+				{Method: http.MethodGet, Path: base + "/policies", Description: "List native-key access policies."},
+				{Method: http.MethodPut, Path: base + "/policies", Description: "Create or replace authorization and quota policy for an active native key."},
+				{Method: http.MethodPut, Path: base + "/policies/bulk", Description: "Atomically validate and merge or replace multiple native-key policies."},
+				{Method: http.MethodDelete, Path: base + "/policies", Description: "Delete policy by key_hash without changing the native CPA key."},
+				{Method: http.MethodGet, Path: base + "/status", Description: "Show native access-policy runtime status."},
+			},
+			Resources: []ResourceRoute{
+				{Path: web.IndexPath, Menu: "密钥权限", Description: "Manage access and quotas for CPA native API keys."},
+			},
+		}
+	}
 	return ManagementRegistrationResponse{
 		Routes: []ManagementRoute{
 			{Method: http.MethodGet, Path: base + "/keys", Description: "List downstream CPA key policies."},
@@ -498,7 +671,7 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/catalog", Description: "Build auth-file model picker catalog with classify + built-in groups."},
 		},
 		Resources: []ResourceRoute{
-			{Path: web.IndexPath, Menu: "Key Policy", Description: "Web UI for managing downstream CPA key policies (create keys, pick models)."},
+			{Path: web.IndexPath, Menu: "密钥权限", Description: "Web UI for managing downstream CPA key policies (create keys, pick models)."},
 		},
 	}
 }
@@ -519,6 +692,80 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 	}
 
 	base := "/v0/management/plugins/" + PluginID
+	if a.nativeMode {
+		switch {
+		case req.Method == http.MethodGet && path == base+"/identities":
+			identities, err := a.native.Identities()
+			if err != nil {
+				return OKEnvelope(jsonError(http.StatusInternalServerError, "native_keys_unavailable", err.Error()))
+			}
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"identities": identities}))
+		case req.Method == http.MethodGet && path == base+"/policies":
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"policies": a.native.Policies()}))
+		case req.Method == http.MethodPut && path == base+"/policies":
+			var input nativeaccess.Policy
+			if err := json.Unmarshal(req.Body, &input); err != nil {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_json", err.Error()))
+			}
+			if err := a.native.Upsert(input); err != nil {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_policy", err.Error()))
+			}
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"policy": input}))
+		case req.Method == http.MethodPut && path == base+"/policies/bulk":
+			var input struct {
+				Policies []nativeaccess.Policy `json:"policies"`
+				Mode     string                `json:"mode"`
+				DryRun   bool                  `json:"dry_run"`
+			}
+			if err := json.Unmarshal(req.Body, &input); err != nil {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_json", err.Error()))
+			}
+			mode := strings.ToLower(strings.TrimSpace(input.Mode))
+			if mode == "" {
+				mode = "merge"
+			}
+			if mode != "merge" && mode != "replace" {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_mode", "mode must be merge or replace"))
+			}
+			policies, err := a.native.Apply(input.Policies, mode == "replace", input.DryRun)
+			if err != nil {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_policy_set", err.Error()))
+			}
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{
+				"policies": policies,
+				"mode":     mode,
+				"dry_run":  input.DryRun,
+			}))
+		case req.Method == http.MethodDelete && path == base+"/policies":
+			hash := ""
+			if values := req.Query["key_hash"]; len(values) > 0 {
+				hash = values[0]
+			}
+			if strings.TrimSpace(hash) == "" {
+				var input struct {
+					KeyHash string `json:"key_hash"`
+				}
+				_ = json.Unmarshal(req.Body, &input)
+				hash = input.KeyHash
+			}
+			if strings.TrimSpace(hash) == "" {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "missing_key_hash", "key_hash is required"))
+			}
+			if err := a.native.Delete(hash); err != nil {
+				return OKEnvelope(jsonError(http.StatusInternalServerError, "delete_failed", err.Error()))
+			}
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"deleted": true, "key_hash": hash}))
+		case req.Method == http.MethodGet && path == base+"/status":
+			return OKEnvelope(jsonResponse(http.StatusOK, a.native.Status()))
+		default:
+			return OKEnvelope(jsonError(http.StatusNotFound, "not_found", "unknown management route"))
+		}
+	}
+	if strings.HasPrefix(path, base) {
+		if err := a.store.RefreshFromDisk(); err != nil {
+			return OKEnvelope(jsonError(http.StatusInternalServerError, "state_refresh_failed", err.Error()))
+		}
+	}
 	switch {
 	case req.Method == http.MethodGet && path == base+"/keys":
 		return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"keys": a.publicKeys(a.store.Keys())}))
@@ -577,6 +824,7 @@ type publicKey struct {
 	Name                string               `json:"name"`
 	Enabled             bool                 `json:"enabled"`
 	KeyPreview          string               `json:"key_preview"`
+	PlainKey            string               `json:"plain_key,omitempty"`
 	RPM                 int                  `json:"rpm"`
 	Models              []policy.ModelRule   `json:"models"`
 	Aliases             []policy.KeyAliasRef `json:"aliases"`
@@ -629,6 +877,7 @@ func (a *App) createKey(body []byte) ManagementResponse {
 		Enabled:             enabled,
 		KeyHash:             hash,
 		KeyPreview:          policy.PreviewKey(plain),
+		PlainKey:            plain,
 		RPM:                 rpm,
 		Models:              req.Models,
 		Aliases:             req.Aliases,
@@ -691,6 +940,9 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 	}
 	if req.Aliases != nil {
 		current.Aliases = req.Aliases
+		// Models is derived from aliases. Keeping the old derived slice here
+		// makes normalizeConfig reconcile the new aliases back to the old list.
+		current.Models = nil
 	}
 	if strings.TrimSpace(req.Key) != "" {
 		hash, err := policy.HashKey(req.Key)
@@ -699,6 +951,7 @@ func (a *App) patchKey(body []byte) ManagementResponse {
 		}
 		current.KeyHash = hash
 		current.KeyPreview = policy.PreviewKey(req.Key)
+		current.PlainKey = strings.TrimSpace(req.Key)
 	}
 	if err := a.store.UpsertKey(*current, true); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid_policy", err.Error())
@@ -795,6 +1048,7 @@ func (a *App) publicKeyFromConfig(key policy.KeyConfig) publicKey {
 		Name:       key.Name,
 		Enabled:    key.Enabled,
 		KeyPreview: key.KeyPreview,
+		PlainKey:   key.PlainKey,
 		RPM:        key.RPM,
 		// Ensure models/aliases always serialize as [] (never null). A nil slice
 		// would marshal to JSON null, which the UI accesses as .length and

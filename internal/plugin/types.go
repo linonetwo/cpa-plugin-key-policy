@@ -16,7 +16,8 @@ const (
 	MethodFrontendAuthIdentifier   = "frontend_auth.identifier"
 	MethodFrontendAuthAuthenticate = "frontend_auth.authenticate"
 
-	MethodModelRoute = "model.route"
+	MethodModelRoute         = "model.route"
+	MethodModelCatalogFilter = "model.catalog_filter"
 
 	MethodResponseInterceptAfter = "response.intercept_after"
 
@@ -42,8 +43,8 @@ const (
 
 const (
 	PluginID   = "cpa-key-policy"
-	PluginName = "cpa-key-policy"
-	Version    = "0.4.4"
+	PluginName = "CPA Key Access"
+	Version    = "0.5.0-native-access-dev"
 )
 
 type Envelope struct {
@@ -89,6 +90,7 @@ type Capabilities struct {
 	FrontendAuthProvider          bool `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool `json:"frontend_auth_provider_exclusive,omitempty"`
 	ModelRouter                   bool `json:"model_router"`
+	ModelCatalogFilter            bool `json:"model_catalog_filter,omitempty"`
 	Scheduler                     bool `json:"scheduler,omitempty"`
 	ResponseInterceptor           bool `json:"response_interceptor"`
 	UsagePlugin                   bool `json:"usage_plugin"`
@@ -130,6 +132,21 @@ type ModelRouteResponse struct {
 	Target      string `json:"Target,omitempty"`
 	TargetModel string `json:"TargetModel,omitempty"`
 	Reason      string `json:"Reason,omitempty"`
+}
+
+type ModelCatalogFilterRequest struct {
+	Method         string              `json:"Method"`
+	Path           string              `json:"Path"`
+	Headers        http.Header         `json:"Headers"`
+	Query          url.Values          `json:"Query"`
+	AccessMetadata map[string]string   `json:"AccessMetadata"`
+	Models         []map[string]any    `json:"Models"`
+	ModelProviders map[string][]string `json:"ModelProviders"`
+}
+
+type ModelCatalogFilterResponse struct {
+	Handled bool             `json:"Handled"`
+	Models  []map[string]any `json:"Models"`
 }
 
 // SchedulerPickRequest is the payload of the host->plugin scheduler.pick call.

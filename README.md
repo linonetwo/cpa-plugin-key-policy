@@ -111,6 +111,31 @@ Copy the `.so` into CPA `plugins.dir` and enable the plugin in config.
 
 ## Config
 
+### Native-access mode
+
+`native-access` removes the second key issuer: CPA's existing `api-keys` are the
+only client identities. The plugin stores only key hashes, grants, quotas, and
+usage counters.
+
+Clients always request the canonical model name. A grant constrains eligible
+providers and, optionally, a server-side credential group:
+
+```json
+{
+  "provider": "codex",
+  "model": "gpt-5.6-*",
+  "group": "classify:csil"
+}
+```
+
+The client sends only `gpt-5.6-sol`. The scheduler accepts only credentials
+classified as `csil`; if none are healthy it fails closed instead of falling
+back to another Codex account. Add several grants with the same canonical model
+to authorize a candidate set. When every usable candidate is authorized, the
+plugin defers to CPA's native priority, fill-first / round-robin, and session
+affinity. Client-visible `provider/model` and legacy dash-prefix aliases are
+not accepted, so upstream selection stays opaque.
+
 Minimal shape (see also [`config.example.yaml`](./config.example.yaml)):
 
 ```yaml
@@ -257,4 +282,3 @@ Per-key `allow_models_endpoint`: **binary** — deny (401) or full global list. 
 go test ./...
 cd web && npm test && npm run build
 ```
-

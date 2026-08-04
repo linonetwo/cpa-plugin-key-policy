@@ -51,6 +51,7 @@ export interface KeyPublic {
   name: string;
   enabled: boolean;
   key_preview: string;
+  plain_key?: string;
   rpm: number;
   models: ModelRule[];
   aliases?: KeyAliasRef[];
@@ -140,6 +141,29 @@ export interface StatusResponse {
   state_file: string;
   key_count: number;
   rpm_usage?: Record<string, unknown>;
+}
+
+export interface NativeIdentity {
+  key_hash: string;
+  key_preview: string;
+  managed: boolean;
+}
+
+export interface NativeGrant {
+  provider: string;
+  model: string;
+  group?: string;
+}
+
+export interface NativePolicy {
+  key_hash: string;
+  enabled: boolean;
+  grants: NativeGrant[];
+  rpm?: number;
+  daily_calls?: number;
+  weekly_calls?: number;
+  daily_tokens?: number;
+  weekly_tokens?: number;
 }
 
 // --- Advanced Mapping types ---

@@ -1,6 +1,6 @@
 {
   "header": {
-    "title": "cpa-key-policy Management",
+    "title": "Key Access Management",
     "keyList": "Keys",
     "newKey": "New Key",
     "logout": "Log out",
@@ -22,6 +22,26 @@
   "session": {
     "restoring": "Restoring session from panel…"
   },
+  "native": {
+    "title": "Key access",
+    "identityHint": "Identities come directly from CPA api-keys. The plugin stores access and quotas, and never issues a second key.",
+    "unmanaged": "No policy",
+    "edit": "Access and quotas",
+    "editTitle": "Edit key access",
+    "enabled": "Allow this key to make requests",
+    "provider": "Provider (supports *)",
+    "model": "Canonical model (supports * and ?)",
+    "group": "Credential group (for example classify:csil)",
+    "upstreamOpaqueHint": "Clients always use canonical model names. Providers and credential groups filter upstreams on the server, and clients cannot select an upstream with a prefix.",
+    "addGrant": "Add access rule",
+    "grantRequired": "At least one complete access rule is required",
+    "rpm": "Requests per minute",
+    "dailyCalls": "Daily calls",
+    "weeklyCalls": "Weekly calls",
+    "dailyTokens": "Daily tokens",
+    "weeklyTokens": "Weekly tokens",
+    "zeroUnlimited": "Zero means unlimited."
+  },
   "keys": {
     "newKey": "New Key",
     "refresh": "Refresh",
@@ -38,6 +58,10 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "edit": "Edit",
+    "copy": "Copy Key",
+    "copyOk": "Key copied",
+    "copyFailed": "Copy failed",
+    "copyUnavailable": "Plaintext is not stored for this key yet; rotate it or ask an administrator to backfill it",
     "resetRpm": "Reset RPM",
     "rotate": "Rotate",
     "delete": "Delete",
