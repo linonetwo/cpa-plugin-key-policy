@@ -1,10 +1,20 @@
 package nativeaccess
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestCallerScopeKeyMatchesCPA(t *testing.T) {
+	const key = "sk-native-one"
+	sum := sha256.Sum256([]byte("cli-proxy-api:caller-scope:v1\x00" + key))
+	if got, want := CallerScopeKey(key), hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("CallerScopeKey=%q want=%q", got, want)
+	}
+}
 
 func TestNativeKeyIsSingleIdentitySource(t *testing.T) {
 	dir := t.TempDir()

@@ -60,9 +60,10 @@ type state struct {
 }
 
 type Identity struct {
-	KeyHash string `json:"key_hash"`
-	Preview string `json:"key_preview"`
-	Managed bool   `json:"managed"`
+	KeyHash     string `json:"key_hash"`
+	CallerScope string `json:"caller_scope"`
+	Preview     string `json:"key_preview"`
+	Managed     bool   `json:"managed"`
 }
 
 type Decision struct {
@@ -96,6 +97,7 @@ type Store struct {
 	stateModTime   int64
 	stateSize      int64
 	activeByHash   map[string]string
+	scopeByHash    map[string]string
 	policiesByHash map[string]Policy
 	usageByHash    map[string]*usage
 	rpm            map[string][]time.Time
@@ -118,6 +120,7 @@ func New(keysFile, stateFile string) (*Store, error) {
 		keysFile:       keysFile,
 		stateFile:      stateFile,
 		activeByHash:   make(map[string]string),
+		scopeByHash:    make(map[string]string),
 		policiesByHash: make(map[string]Policy),
 		usageByHash:    make(map[string]*usage),
 		rpm:            make(map[string][]time.Time),
@@ -146,6 +149,11 @@ func absolutePath(path string) (string, error) {
 func HashKey(key string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
 	return hashPrefix + hex.EncodeToString(sum[:])
+}
+
+func CallerScopeKey(key string) string {
+	sum := sha256.Sum256([]byte("cli-proxy-api:caller-scope:v1\x00" + strings.TrimSpace(key)))
+	return hex.EncodeToString(sum[:])
 }
 
 func PreviewKey(key string) string {
@@ -409,13 +417,17 @@ func (s *Store) refreshKeysLocked(force bool) error {
 		return fmt.Errorf("parse native CPA keys: %w", err)
 	}
 	next := make(map[string]string, len(cfg.APIKeys))
+	nextScopes := make(map[string]string, len(cfg.APIKeys))
 	for _, key := range cfg.APIKeys {
 		key = strings.TrimSpace(key)
 		if key != "" {
-			next[HashKey(key)] = PreviewKey(key)
+			hash := HashKey(key)
+			next[hash] = PreviewKey(key)
+			nextScopes[hash] = CallerScopeKey(key)
 		}
 	}
 	s.activeByHash = next
+	s.scopeByHash = nextScopes
 	s.keysModTime = info.ModTime().UnixNano()
 	s.keysSize = info.Size()
 	return nil
@@ -570,7 +582,12 @@ func (s *Store) Identities() ([]Identity, error) {
 	out := make([]Identity, 0, len(s.activeByHash))
 	for hash, preview := range s.activeByHash {
 		_, managed := s.policiesByHash[hash]
-		out = append(out, Identity{KeyHash: hash, Preview: preview, Managed: managed})
+		out = append(out, Identity{
+			KeyHash:     hash,
+			CallerScope: s.scopeByHash[hash],
+			Preview:     preview,
+			Managed:     managed,
+		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].KeyHash < out[j].KeyHash })
 	return out, nil
