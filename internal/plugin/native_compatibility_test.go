@@ -128,7 +128,6 @@ func TestNativeCanonicalModelAndServerSideCredentialGroup(t *testing.T) {
 	}
 	for _, requested := range []string{
 		"codex-csil/gpt-5.6-sol",
-		"codex-csil-gpt-5.6-sol",
 	} {
 		body := []byte(`{"model":"` + requested + `"}`)
 		authRequest, _ := json.Marshal(FrontendAuthRequest{
@@ -142,9 +141,24 @@ func TestNativeCanonicalModelAndServerSideCredentialGroup(t *testing.T) {
 		if err := unmarshalOK(rawAuth, &auth); err != nil {
 			t.Fatal(err)
 		}
-		if auth.Authenticated {
-			t.Fatalf("client upstream selector %q must be denied: %#v", requested, auth)
+		if !auth.Authenticated {
+			t.Fatalf("authorized native upstream selector %q must be accepted: %#v", requested, auth)
 		}
+	}
+	body := []byte(`{"model":"codex-csil-gpt-5.6-sol"}`)
+	authRequest, _ := json.Marshal(FrontendAuthRequest{
+		Method:  "POST",
+		Path:    "/v1/responses",
+		Headers: map[string][]string{"Authorization": {"Bearer " + key}},
+		Body:    body,
+	})
+	rawAuth, _ := app.HandleMethod(MethodFrontendAuthAuthenticate, authRequest)
+	var auth FrontendAuthResponse
+	if err := unmarshalOK(rawAuth, &auth); err != nil {
+		t.Fatal(err)
+	}
+	if auth.Authenticated {
+		t.Fatalf("legacy dash upstream selector must be denied: %#v", auth)
 	}
 
 	schedulerRequest, _ := json.Marshal(SchedulerPickRequest{

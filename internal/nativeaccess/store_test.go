@@ -171,13 +171,19 @@ func TestClientVisibleUpstreamSelectorsAreRejected(t *testing.T) {
 		got.TargetModel != "gpt-5.6-sol" {
 		t.Fatalf("canonical model must be allowed unchanged: %#v", got)
 	}
+	gotPrefixed := store.Authenticate(key, "codex-csil/gpt-5.6-sol", false)
+	if !gotPrefixed.Allowed || gotPrefixed.TargetModel != "gpt-5.6-sol" ||
+		gotPrefixed.Reason != "allowed_native_upstream_prefix" {
+		t.Fatalf("authorized native prefix must select its grant: %#v", gotPrefixed)
+	}
 	for _, requested := range []string{
-		"codex-csil/gpt-5.6-sol",
 		"codex-csil-gpt-5.6-sol",
 		"codex-csil-gpt-5.7-sol",
+		"codex-other/gpt-5.6-sol",
+		"codex-csil/gpt-5.7-sol",
 	} {
 		if got := store.Authenticate(key, requested, false); got.Allowed {
-			t.Fatalf("client upstream selector %q must be rejected: %#v", requested, got)
+			t.Fatalf("unauthorized upstream selector %q must be rejected: %#v", requested, got)
 		}
 	}
 
@@ -260,10 +266,15 @@ func TestCanonicalModelAllowsOneOrManyServerSideUpstreams(t *testing.T) {
 		}
 	})
 
-	t.Run("explicit native prefix is forbidden", func(t *testing.T) {
+	t.Run("explicit authorized native prefix selects one upstream", func(t *testing.T) {
 		got := store.Authenticate(key, "codex-csil/gpt-5.6-sol", false)
-		if got.Allowed {
-			t.Fatalf("client prefix must be denied: %#v", got)
+		if !got.Allowed || got.TargetModel != "gpt-5.6-sol" ||
+			got.Reason != "allowed_native_upstream_prefix" {
+			t.Fatalf("authorized client prefix must be accepted: %#v", got)
+		}
+		grants, ok := store.SchedulerGrants(HashKey(key), "codex-csil/gpt-5.6-sol")
+		if !ok || len(grants) != 1 || grants[0].Group != "classify:csil" {
+			t.Fatalf("prefixed request must expose only the selected grant: %#v %v", grants, ok)
 		}
 	})
 
@@ -366,12 +377,20 @@ func TestOpenAICompatibleProvidersAreScopedPerRequestedModel(t *testing.T) {
 		}
 	}
 	for _, requested := range []string{
-		"siliconflow/deepseek-v4-pro",
 		"siliconflow/zai-org/GLM-5.2",
 		"deepseek-own/deepseek-v4-pro",
 	} {
+		got := store.Authenticate(key, requested, false)
+		if !got.Allowed {
+			t.Fatalf("authorized native provider selector %q must be accepted: %#v", requested, got)
+		}
+	}
+	for _, requested := range []string{
+		"siliconflow/deepseek-v4-pro",
+		"deepseek-own/zai-org/GLM-5.2",
+	} {
 		if got := store.Authenticate(key, requested, false); got.Allowed {
-			t.Fatalf("client provider selector %q must be rejected: %#v", requested, got)
+			t.Fatalf("unauthorized native provider selector %q must be rejected: %#v", requested, got)
 		}
 	}
 }
