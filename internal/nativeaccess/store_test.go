@@ -377,12 +377,20 @@ func TestOpenAICompatibleProvidersAreScopedPerRequestedModel(t *testing.T) {
 		}
 	}
 	for _, requested := range []string{
-		"siliconflow/deepseek-v4-pro",
 		"siliconflow/zai-org/GLM-5.2",
 		"deepseek-own/deepseek-v4-pro",
 	} {
+		got := store.Authenticate(key, requested, false)
+		if !got.Allowed {
+			t.Fatalf("authorized native provider selector %q must be accepted: %#v", requested, got)
+		}
+	}
+	for _, requested := range []string{
+		"siliconflow/deepseek-v4-pro",
+		"deepseek-own/zai-org/GLM-5.2",
+	} {
 		if got := store.Authenticate(key, requested, false); got.Allowed {
-			t.Fatalf("client provider selector %q must be rejected: %#v", requested, got)
+			t.Fatalf("unauthorized native provider selector %q must be rejected: %#v", requested, got)
 		}
 	}
 }
