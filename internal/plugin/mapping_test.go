@@ -60,6 +60,43 @@ func TestClassifyPreview(t *testing.T) {
 	}
 }
 
+func TestNativeCatalogUsesConfiguredClassificationRules(t *testing.T) {
+	app := NewApp()
+	app.nativeMode = true
+	app.nativeClassifyRules = []policy.ClassifyRule{{
+		Name:    "csil",
+		Field:   "filename",
+		Pattern: "csil",
+		Group:   "csil",
+		Enabled: true,
+	}}
+
+	reqBody, err := json.Marshal(map[string]any{
+		"credentials": []map[string]any{{
+			"id":       "codex-csil.json",
+			"provider": "codex",
+			"models":   []string{"gpt-5.6-sol"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := app.buildCatalog(reqBody)
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, string(resp.Body))
+	}
+
+	var result struct {
+		Entries []policy.CatalogEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 1 || result.Entries[0].Group != "classify:csil" {
+		t.Fatalf("native catalog did not apply configured rules: %+v", result.Entries)
+	}
+}
+
 // TestClassifyPreviewCustomRules verifies that custom rules with a custom
 // field name work correctly.
 func TestClassifyPreviewCustomField(t *testing.T) {

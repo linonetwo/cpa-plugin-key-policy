@@ -160,7 +160,13 @@ func (a *App) classifyPreview(raw []byte) ManagementResponse {
 	// Use provided rules or fall back to the store's current rules.
 	rules := req.Rules
 	if len(rules) == 0 {
-		rules = a.store.ClassifyRulesSnapshot()
+		if a.nativeMode {
+			a.classifyMu.RLock()
+			rules = append([]policy.ClassifyRule(nil), a.nativeClassifyRules...)
+			a.classifyMu.RUnlock()
+		} else {
+			rules = a.store.ClassifyRulesSnapshot()
+		}
 	}
 
 	// Pre-compile the rules.
@@ -266,7 +272,13 @@ func (a *App) buildCatalog(raw []byte) ManagementResponse {
 	}
 	rules := req.Rules
 	if len(rules) == 0 {
-		rules = a.store.ClassifyRulesSnapshot()
+		if a.nativeMode {
+			a.classifyMu.RLock()
+			rules = append([]policy.ClassifyRule(nil), a.nativeClassifyRules...)
+			a.classifyMu.RUnlock()
+		} else {
+			rules = a.store.ClassifyRulesSnapshot()
+		}
 	}
 	entries := policy.BuildCatalogEntries(req.Credentials, rules)
 	if entries == nil {
