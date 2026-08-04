@@ -180,7 +180,12 @@ func (a *App) authenticate(raw []byte) ([]byte, error) {
 		rawKey := policy.ExtractAPIKey(req.Headers, req.Query)
 		modelsEndpoint := policy.IsModelsEndpoint(req.Path)
 		requested := policy.ExtractRequestedModel(req.Path, req.Query, req.Body)
-		decision := a.native.Authenticate(rawKey, requested, modelsEndpoint)
+		// A Responses WebSocket authenticates during the initial GET upgrade,
+		// before the first response.create frame carries a model. Authorize the
+		// native key and enabled policy here; model authorization still happens
+		// for each frame in model.route/scheduler.pick.
+		identityOnly := modelsEndpoint || isResponsesWebsocketHandshake(req)
+		decision := a.native.Authenticate(rawKey, requested, identityOnly)
 		if !decision.Known || !decision.Allowed {
 			return OKEnvelope(FrontendAuthResponse{Authenticated: false})
 		}
@@ -228,6 +233,17 @@ func (a *App) authenticate(raw []byte) ([]byte, error) {
 		Principal:     decision.Principal,
 		Metadata:      meta,
 	})
+}
+
+func isResponsesWebsocketHandshake(req FrontendAuthRequest) bool {
+	if !strings.EqualFold(strings.TrimSpace(req.Method), http.MethodGet) {
+		return false
+	}
+	path := strings.TrimRight(strings.TrimSpace(req.Path), "/")
+	if path != "/v1/responses" && path != "/backend-api/codex/responses" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(req.Headers.Get("Upgrade")), "websocket")
 }
 
 func (a *App) routeModel(raw []byte) ([]byte, error) {

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -168,5 +169,110 @@ func TestNativeCanonicalModelAndServerSideCredentialGroup(t *testing.T) {
 	}
 	if !scheduler.Handled || scheduler.AuthID != "codex-csil.json" {
 		t.Fatalf("scheduler crossed credential groups: %#v", scheduler)
+	}
+}
+
+func TestNativeResponsesWebsocketHandshakeDefersModelAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	keysFile := filepath.Join(dir, "config.yaml")
+	stateFile := filepath.Join(dir, "native-state.json")
+	const key = "sk-websocket-native"
+	if err := os.WriteFile(keysFile, []byte("api-keys:\n  - "+key+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := nativeaccess.New(keysFile, stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(nativeaccess.Policy{
+		KeyHash: nativeaccess.HashKey(key),
+		Enabled: true,
+		Grants: []nativeaccess.Grant{{
+			Provider: "codex",
+			Model:    "gpt-5.6-sol",
+			Group:    "classify:csil",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app := NewApp()
+	configYAML := []byte(
+		"enabled: true\n" +
+			"mode: native-access\n" +
+			"state_file: " + filepath.ToSlash(filepath.Join(dir, "legacy-unused.json")) + "\n" +
+			"native_keys_file: " + filepath.ToSlash(keysFile) + "\n" +
+			"native_state_file: " + filepath.ToSlash(stateFile) + "\n",
+	)
+	configRequest, _ := json.Marshal(LifecycleRequest{ConfigYAML: configYAML})
+	if _, err := app.HandleMethod(MethodPluginReconfigure, configRequest); err != nil {
+		t.Fatal(err)
+	}
+
+	handshakeRequest, _ := json.Marshal(FrontendAuthRequest{
+		Method: http.MethodGet,
+		Path:   "/v1/responses",
+		Headers: map[string][]string{
+			"Authorization": {"Bearer " + key},
+			"Upgrade":       {"websocket"},
+			"Connection":    {"Upgrade"},
+		},
+	})
+	rawHandshake, errHandshake := app.HandleMethod(MethodFrontendAuthAuthenticate, handshakeRequest)
+	if errHandshake != nil {
+		t.Fatal(errHandshake)
+	}
+	var handshake FrontendAuthResponse
+	if err := unmarshalOK(rawHandshake, &handshake); err != nil {
+		t.Fatal(err)
+	}
+	if !handshake.Authenticated || handshake.Metadata["key_hash"] != nativeaccess.HashKey(key) ||
+		handshake.Metadata["requested_model"] != "" {
+		t.Fatalf("websocket handshake must authenticate identity only: %#v", handshake)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		key   string
+		path  string
+		model string
+		ws    bool
+		want  bool
+	}{
+		{name: "unknown key handshake", key: "sk-unknown", path: "/v1/responses", ws: true, want: false},
+		{name: "ordinary GET is not a handshake", key: key, path: "/v1/models", want: true},
+		{name: "allowed frame model", key: key, path: "/v1/responses", model: "gpt-5.6-sol", want: true},
+		{name: "forbidden frame model", key: key, path: "/v1/responses", model: "gpt-5.6-luna", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			method := http.MethodPost
+			headers := map[string][]string{"Authorization": {"Bearer " + tc.key}}
+			body := []byte(`{"model":"` + tc.model + `"}`)
+			if tc.model == "" {
+				method = http.MethodGet
+				body = nil
+			}
+			if tc.ws {
+				headers["Upgrade"] = []string{"websocket"}
+				headers["Connection"] = []string{"Upgrade"}
+			}
+			authRequest, _ := json.Marshal(FrontendAuthRequest{
+				Method:  method,
+				Path:    tc.path,
+				Headers: headers,
+				Body:    body,
+			})
+			rawAuth, errAuth := app.HandleMethod(MethodFrontendAuthAuthenticate, authRequest)
+			if errAuth != nil {
+				t.Fatal(errAuth)
+			}
+			var auth FrontendAuthResponse
+			if err := unmarshalOK(rawAuth, &auth); err != nil {
+				t.Fatal(err)
+			}
+			if auth.Authenticated != tc.want {
+				t.Fatalf("authenticated=%t, want %t: %#v", auth.Authenticated, tc.want, auth)
+			}
+		})
 	}
 }
