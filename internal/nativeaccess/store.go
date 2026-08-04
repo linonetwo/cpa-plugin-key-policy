@@ -171,7 +171,10 @@ func normalizePolicy(input Policy) (Policy, error) {
 		grant.Provider = strings.ToLower(strings.TrimSpace(grant.Provider))
 		grant.Model = strings.TrimSpace(grant.Model)
 		grant.Group = strings.TrimSpace(grant.Group)
-		grant.UpstreamPrefix = strings.Trim(strings.TrimSpace(grant.UpstreamPrefix), "/")
+		grant.UpstreamPrefix = strings.ToLower(strings.Trim(strings.TrimSpace(grant.UpstreamPrefix), "/"))
+		if strings.Contains(grant.UpstreamPrefix, "/") {
+			return Policy{}, errors.New("upstream_prefix must be one CPA native prefix without '/'")
+		}
 		prefixes := make([]string, 0, len(grant.AcceptedPrefixes))
 		prefixSeen := make(map[string]struct{}, len(grant.AcceptedPrefixes))
 		for _, prefix := range grant.AcceptedPrefixes {
@@ -213,10 +216,9 @@ func normalizePolicy(input Policy) (Policy, error) {
 		if grant.Provider == "*" && (grant.Group != "" || grant.UpstreamPrefix != "") {
 			return Policy{}, errors.New("group and upstream_prefix require a concrete provider")
 		}
-		// V2 routes exclusively from canonical model + server-side provider/group
-		// grants. Strip the former client-prefix compatibility fields whenever
-		// policy state is loaded or saved.
-		grant.UpstreamPrefix = ""
+		// Legacy dash aliases are no longer client-visible. Keep only CPA's
+		// native upstream prefix so an explicitly authorized "prefix/model"
+		// request can select the same provider/group grant.
 		grant.AcceptedPrefixes = nil
 		grant.AcceptedModels = nil
 		id := grant.Provider + "\x00" + strings.ToLower(grant.Model) + "\x00" +
@@ -285,16 +287,41 @@ func grantScore(grant Grant, model string) int {
 	return score
 }
 
-func hasClientUpstreamSelector(policy Policy, requestedModel string) bool {
+func matchingNativePrefixGrants(policy Policy, requestedModel string) (string, []grantMatch, bool) {
 	requestedModel = strings.TrimSpace(requestedModel)
 	prefix, model, slash := strings.Cut(requestedModel, "/")
-	if slash && strings.TrimSpace(prefix) != "" && strings.TrimSpace(model) != "" {
-		for _, grant := range policy.Grants {
-			if grant.UpstreamPrefix != "" && strings.EqualFold(grant.UpstreamPrefix, strings.Trim(prefix, "/ ")) {
-				return true
-			}
+	prefix = strings.Trim(prefix, "/ ")
+	model = strings.TrimSpace(model)
+	if !slash || prefix == "" || model == "" {
+		return "", nil, false
+	}
+	matches := make([]grantMatch, 0, len(policy.Grants))
+	bestScore := -1
+	for _, grant := range policy.Grants {
+		if grant.UpstreamPrefix == "" || !strings.EqualFold(grant.UpstreamPrefix, prefix) {
+			continue
+		}
+		canonicalModel, score, matched := matchGrant(grant, model)
+		if !matched {
+			continue
+		}
+		if score > bestScore {
+			matches = matches[:0]
+			bestScore = score
+		}
+		if score == bestScore {
+			matches = append(matches, grantMatch{
+				grant:          grant,
+				canonicalModel: canonicalModel,
+				score:          score,
+			})
 		}
 	}
+	return model, matches, len(matches) > 0
+}
+
+func hasLegacyClientUpstreamSelector(policy Policy, requestedModel string) bool {
+	requestedModel = strings.TrimSpace(requestedModel)
 	for _, grant := range policy.Grants {
 		for _, acceptedModel := range grant.AcceptedModels {
 			if strings.EqualFold(strings.TrimSpace(acceptedModel), requestedModel) {
@@ -334,13 +361,23 @@ func matchingGrants(policy Policy, requestedModel string) []grantMatch {
 	return matches
 }
 
-// routeDecision authorizes only the canonical client model name. Upstream
-// selection is intentionally absent here: scheduler.pick filters the host's
-// auth candidates using every matching grant, so the upstream remains opaque
-// to clients and one key can safely authorize one or many credential groups.
+// routeDecision authorizes canonical model names and CPA's native
+// "prefix/model" syntax. Native prefixes are accepted only when the same grant
+// authorizes both the prefix and canonical model; legacy dash aliases remain
+// forbidden. scheduler.pick applies the matching grant set to auth candidates.
 func routeDecision(policy Policy, requestedModel string) Decision {
 	requestedModel = strings.TrimSpace(requestedModel)
-	if hasClientUpstreamSelector(policy, requestedModel) {
+	if canonicalModel, matches, ok := matchingNativePrefixGrants(policy, requestedModel); ok {
+		return Decision{
+			Allowed:     true,
+			Provider:    matches[0].grant.Provider,
+			Model:       requestedModel,
+			TargetModel: canonicalModel,
+			Group:       matches[0].grant.Group,
+			Reason:      "allowed_native_upstream_prefix",
+		}
+	}
+	if hasLegacyClientUpstreamSelector(policy, requestedModel) {
 		return Decision{Model: requestedModel, Reason: "client_upstream_selector_forbidden"}
 	}
 	matches := matchingGrants(policy, requestedModel)
@@ -784,8 +821,15 @@ func (s *Store) SchedulerGrants(keyHash, model string) ([]Grant, bool) {
 		return nil, false
 	}
 	policy, exists := s.policiesByHash[keyHash]
-	if !exists || !policy.Enabled || hasClientUpstreamSelector(policy, model) {
+	if !exists || !policy.Enabled || hasLegacyClientUpstreamSelector(policy, model) {
 		return nil, false
+	}
+	if _, matches, ok := matchingNativePrefixGrants(policy, model); ok {
+		grants := make([]Grant, 0, len(matches))
+		for _, match := range matches {
+			grants = append(grants, match.grant)
+		}
+		return grants, true
 	}
 	matches := matchingGrants(policy, model)
 	if len(matches) == 0 {
