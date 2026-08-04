@@ -659,6 +659,8 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 				{Method: http.MethodPut, Path: base + "/policies", Description: "Create or replace authorization and quota policy for an active native key."},
 				{Method: http.MethodPut, Path: base + "/policies/bulk", Description: "Atomically validate and merge or replace multiple native-key policies."},
 				{Method: http.MethodDelete, Path: base + "/policies", Description: "Delete policy by key_hash without changing the native CPA key."},
+				{Method: http.MethodGet, Path: base + "/classify-rules", Description: "List configured credential classification rules for access-policy suggestions."},
+				{Method: http.MethodPost, Path: base + "/catalog", Description: "Build the native access-policy catalog with credential groups."},
 				{Method: http.MethodGet, Path: base + "/status", Description: "Show native access-policy runtime status."},
 			},
 			Resources: []ResourceRoute{
@@ -771,6 +773,13 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 				return OKEnvelope(jsonError(http.StatusInternalServerError, "delete_failed", err.Error()))
 			}
 			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"deleted": true, "key_hash": hash}))
+		case req.Method == http.MethodGet && path == base+"/classify-rules":
+			a.classifyMu.RLock()
+			rules := append([]policy.ClassifyRule(nil), a.nativeClassifyRules...)
+			a.classifyMu.RUnlock()
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"rules": rules}))
+		case req.Method == http.MethodPost && path == base+"/catalog":
+			return OKEnvelope(a.buildCatalog(req.Body))
 		case req.Method == http.MethodGet && path == base+"/status":
 			return OKEnvelope(jsonResponse(http.StatusOK, a.native.Status()))
 		default:

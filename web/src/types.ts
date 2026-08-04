@@ -149,6 +149,16 @@ export interface NativeIdentity {
   managed: boolean;
 }
 
+// CPAMP owns the human-readable name for a CPA native API key. The plugin
+// joins this display metadata by SHA-256 hash and never persists a second name.
+export interface ApiKeyAlias {
+  apiKeyHash?: string;
+  api_key_hash?: string;
+  alias: string;
+  updatedAtMs?: number;
+  updated_at_ms?: number;
+}
+
 export interface NativeGrant {
   provider: string;
   model: string;

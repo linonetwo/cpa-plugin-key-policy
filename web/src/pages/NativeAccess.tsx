@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  listApiKeyAliases,
   listNativeIdentities,
   listNativePolicies,
   saveNativePolicy,
 } from "../api/nativeAccess";
 import { fetchCatalog } from "../api/models";
-import type { CatalogModel, NativeGrant, NativeIdentity, NativePolicy } from "../types";
+import { fetchClassifyRules } from "../api/mappings";
+import type {
+  ApiKeyAlias,
+  CatalogModel,
+  ClassifyRule,
+  NativeGrant,
+  NativeIdentity,
+  NativePolicy,
+} from "../types";
 import { useT } from "../i18n";
+import { nativeGroupOptions, nativeIdentityAlias } from "./nativeAccessModel";
 
 const emptyGrant = (): NativeGrant => ({ provider: "", model: "" });
 const numberValue = (value: string): number => {
@@ -19,7 +29,10 @@ export default function NativeAccess() {
   const [identities, setIdentities] = useState<NativeIdentity[]>([]);
   const [policies, setPolicies] = useState<NativePolicy[]>([]);
   const [catalog, setCatalog] = useState<CatalogModel[]>([]);
+  const [aliases, setAliases] = useState<ApiKeyAlias[]>([]);
+  const [classifyRules, setClassifyRules] = useState<ClassifyRule[]>([]);
   const [editing, setEditing] = useState<NativePolicy | null>(null);
+  const [toggling, setToggling] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -27,14 +40,20 @@ export default function NativeAccess() {
     setLoading(true);
     setError("");
     try {
-      const [nextIdentities, nextPolicies, nextCatalog] = await Promise.all([
+      const [nextIdentities, nextPolicies, nextCatalog, nextAliases, nextRules] = await Promise.all([
         listNativeIdentities(),
         listNativePolicies(),
         fetchCatalog(),
+        // CPAMP-only display metadata is optional when the plugin UI is opened
+        // directly against CPA or an older manager build.
+        listApiKeyAliases().catch(() => []),
+        fetchClassifyRules().catch(() => []),
       ]);
       setIdentities(nextIdentities);
       setPolicies(nextPolicies);
       setCatalog(nextCatalog);
+      setAliases(nextAliases);
+      setClassifyRules(nextRules);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -53,6 +72,22 @@ export default function NativeAccess() {
     });
   };
 
+  const togglePolicy = async (policy: NativePolicy) => {
+    setToggling(policy.key_hash);
+    setError("");
+    try {
+      const next = { ...policy, enabled: !policy.enabled };
+      await saveNativePolicy(next);
+      setPolicies((current) =>
+        current.map((item) => item.key_hash === next.key_hash ? next : item),
+      );
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setToggling("");
+    }
+  };
+
   return (
     <div>
       <div className="fp-head" style={{ margin: "0 0 16px" }}>
@@ -67,16 +102,30 @@ export default function NativeAccess() {
         <div className="card-stack">
           {identities.map((identity) => {
             const policy = policies.find((item) => item.key_hash === identity.key_hash);
+            const alias = nativeIdentityAlias(identity, aliases);
             return (
               <div className="card" key={identity.key_hash}>
                 <div className="fp-head">
                   <div>
-                    <strong>{identity.key_preview}</strong>
+                    <strong>{alias || identity.key_preview}</strong>
+                    {alias && <div className="muted mono">{identity.key_preview}</div>}
                     <div className="muted mono">{identity.key_hash.slice(0, 19)}…</div>
                   </div>
-                  <span className={"badge " + (policy?.enabled ? "success" : "")}>
-                    {policy ? (policy.enabled ? t("keys.enabled") : t("keys.disabled")) : t("native.unmanaged")}
-                  </span>
+                  {policy ? (
+                    <label className="switch" aria-label={policy.enabled ? t("keys.enabled") : t("keys.disabled")}>
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        checked={policy.enabled}
+                        disabled={toggling === policy.key_hash}
+                        onChange={() => void togglePolicy(policy)}
+                      />
+                      <span className="track"><span className="thumb" /></span>
+                      {policy.enabled ? t("keys.enabled") : t("keys.disabled")}
+                    </label>
+                  ) : (
+                    <span className="badge">{t("native.unmanaged")}</span>
+                  )}
                 </div>
                 <div className="chip-row">
                   {(policy?.grants ?? []).map((grant, index) => (
@@ -95,6 +144,7 @@ export default function NativeAccess() {
         <NativePolicyEditor
           policy={editing}
           catalog={catalog}
+          classifyRules={classifyRules}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void load(); }}
         />
@@ -106,11 +156,13 @@ export default function NativeAccess() {
 function NativePolicyEditor({
   policy: initial,
   catalog,
+  classifyRules,
   onClose,
   onSaved,
 }: {
   policy: NativePolicy;
   catalog: CatalogModel[];
+  classifyRules: ClassifyRule[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -190,7 +242,7 @@ function NativePolicyEditor({
               </datalist>
               <input className="input" list={`native-groups-${index}`} value={grant.group ?? ""} placeholder={t("native.group")} onChange={(e) => updateGrant(index, { group: e.target.value || undefined })} />
               <datalist id={`native-groups-${index}`}>
-                {[...new Set(catalog.filter((item) => (grant.provider === "*" || item.provider === grant.provider) && (!grant.model || item.model === grant.model)).map((item) => item.group).filter((group): group is string => !!group))].map((group) => <option value={group} key={group} />)}
+                {nativeGroupOptions(grant, catalog, classifyRules).map((group) => <option value={group} key={group} />)}
               </datalist>
             </div>
             <button className="btn sm danger-outline" onClick={() => setPolicy({ ...policy, grants: policy.grants.filter((_, i) => i !== index) })}>{t("keys.delete")}</button>

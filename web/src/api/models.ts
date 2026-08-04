@@ -320,10 +320,13 @@ export async function fetchCatalog(
   const selected = new Set<string>();
   for (const p of selectedProviders ?? []) selected.add(p.toLowerCase());
 
-  const safe = async <T>(p: Promise<{ data: T }>, apply: (d: T) => void) => {
+  const safe = async <T>(
+    p: Promise<{ data: T }>,
+    apply: (d: T) => void | Promise<void>,
+  ) => {
     try {
       const { data } = await p;
-      apply(data);
+      await apply(data);
     } catch {
       /* skip unavailable source */
     }
@@ -432,7 +435,9 @@ export async function fetchCatalog(
   for (const ch of STATIC_CHANNELS) {
     await safe(
       c.get("/v0/management/model-definitions/" + ch),
-      (d) => entries.push(...fromModelDefinitions(ch, d)),
+      (d) => {
+        entries.push(...fromModelDefinitions(ch, d));
+      },
     );
   }
 

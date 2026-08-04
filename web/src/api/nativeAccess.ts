@@ -1,5 +1,5 @@
 import { apiClient, pluginPath } from "./client";
-import type { NativeIdentity, NativePolicy } from "../types";
+import type { ApiKeyAlias, NativeIdentity, NativePolicy } from "../types";
 
 export async function fetchPluginMode(): Promise<"legacy" | "native-access"> {
   const { data } = await apiClient().get<{ mode?: string }>(pluginPath("/status"));
@@ -18,6 +18,13 @@ export async function listNativePolicies(): Promise<NativePolicy[]> {
     pluginPath("/policies"),
   );
   return data.policies ?? [];
+}
+
+export async function listApiKeyAliases(): Promise<ApiKeyAlias[]> {
+  const { data } = await apiClient().get<{ items?: ApiKeyAlias[] }>(
+    "/v0/management/api-key-aliases",
+  );
+  return data.items ?? [];
 }
 
 export async function saveNativePolicy(policy: NativePolicy): Promise<void> {
