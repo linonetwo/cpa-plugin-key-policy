@@ -97,6 +97,49 @@ func TestNativeSchedulerLocksKeyToOneCredentialGroup(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerRecoversKeyIdentityFromRequestHeaders(t *testing.T) {
+	app, _ := configureNativeSchedulerApp(t, []nativeaccess.Grant{{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Group:    "classify:csil",
+	}})
+	request, _ := json.Marshal(SchedulerPickRequest{
+		Model: "gpt-5.6-sol",
+		Options: SchedulerPickOptions{
+			Headers: map[string][]string{
+				"Authorization": {"Bearer sk-server-side-routing"},
+			},
+			// Match production: CPA currently does not propagate the
+			// FrontendAuthResponse metadata into scheduler metadata.
+			Metadata: map[string]any{
+				"requested_model": "gpt-5.6-sol",
+			},
+		},
+		Candidates: []SchedulerAuthCandidate{
+			{ID: "codex-dongwu.json", Provider: "codex"},
+			{ID: "codex-csil.json", Provider: "codex"},
+		},
+	})
+	raw, err := app.HandleMethod(MethodSchedulerPick, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var response SchedulerPickResponse
+	if !envelope.OK {
+		t.Fatalf("expected successful policy selection, envelope=%#v", envelope)
+	}
+	if err := json.Unmarshal(envelope.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Handled || response.AuthID != "codex-csil.json" {
+		t.Fatalf("request header identity must enforce CSiL-only selection, response=%#v", response)
+	}
+}
+
 func TestNativeSchedulerAllowsUnionOfCredentialGroups(t *testing.T) {
 	app, keyHash := configureNativeSchedulerApp(t, []nativeaccess.Grant{
 		{Provider: "codex", Model: "gpt-5.6-sol", Group: "classify:dongwu"},

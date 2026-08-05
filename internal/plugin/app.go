@@ -405,6 +405,18 @@ func (a *App) pickScheduler(raw []byte) ([]byte, error) {
 
 func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
 	keyHash := schedulerMetadataString(req.Options.Metadata, "key_hash")
+	if keyHash == "" {
+		// FrontendAuthResponse.Metadata is not currently copied into the
+		// executor metadata by CPA. The scheduler still receives the original
+		// downstream request headers, so recover the same stable identity here
+		// instead of silently falling through to CPA's unrestricted scheduler.
+		//
+		// Never retain or log the plaintext key.
+		rawKey := policy.ExtractAPIKey(http.Header(req.Options.Headers), nil)
+		if rawKey != "" {
+			keyHash = nativeaccess.HashKey(rawKey)
+		}
+	}
 	requestedModel := schedulerMetadataString(req.Options.Metadata, "requested_model")
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(req.Model)
