@@ -192,6 +192,8 @@ func (a *App) authenticate(raw []byte) ([]byte, error) {
 		metadata := map[string]string{
 			"provider":        PluginID,
 			"key_hash":        decision.KeyHash,
+			"credential_hash": decision.KeyHash,
+			"principal_id":    decision.Principal,
 			"requested_model": decision.Model,
 		}
 		return OKEnvelope(FrontendAuthResponse{
@@ -695,6 +697,9 @@ func (a *App) managementRegistration() ManagementRegistrationResponse {
 			Routes: []ManagementRoute{
 				{Method: http.MethodGet, Path: base + "/identities", Description: "List active CPA native keys by hash and policy status."},
 				{Method: http.MethodGet, Path: base + "/policies", Description: "List native-key access policies."},
+				{Method: http.MethodGet, Path: base + "/credentials", Description: "List credential-version history by stable principal."},
+				{Method: http.MethodPost, Path: base + "/rotations", Description: "Continue a native key rotation onto an existing principal."},
+				{Method: http.MethodDelete, Path: base + "/rotations", Description: "Undo a rotation binding while the new key remains active."},
 				{Method: http.MethodPut, Path: base + "/policies", Description: "Create or replace authorization and quota policy for an active native key."},
 				{Method: http.MethodPut, Path: base + "/policies/bulk", Description: "Atomically validate and merge or replace multiple native-key policies."},
 				{Method: http.MethodDelete, Path: base + "/policies", Description: "Delete policy by key_hash without changing the native CPA key."},
@@ -759,6 +764,28 @@ func (a *App) handleManagement(raw []byte) ([]byte, error) {
 			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"identities": identities}))
 		case req.Method == http.MethodGet && path == base+"/policies":
 			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"policies": a.native.Policies()}))
+		case req.Method == http.MethodGet && path == base+"/credentials":
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{
+				"credentials": a.native.Credentials(strings.TrimSpace(req.Query.Get("principal_id"))),
+			}))
+		case (req.Method == http.MethodPost || req.Method == http.MethodDelete) && path == base+"/rotations":
+			var input struct {
+				PrincipalID string `json:"principal_id"`
+				NewKeyHash  string `json:"new_key_hash"`
+			}
+			if err := json.Unmarshal(req.Body, &input); err != nil {
+				return OKEnvelope(jsonError(http.StatusBadRequest, "invalid_json", err.Error()))
+			}
+			var err error
+			if req.Method == http.MethodPost {
+				err = a.native.ContinueRotation(input.PrincipalID, input.NewKeyHash)
+			} else {
+				err = a.native.UndoRotation(input.PrincipalID, input.NewKeyHash)
+			}
+			if err != nil {
+				return OKEnvelope(jsonError(http.StatusConflict, "rotation_rejected", err.Error()))
+			}
+			return OKEnvelope(jsonResponse(http.StatusOK, map[string]any{"ok": true}))
 		case req.Method == http.MethodPut && path == base+"/policies":
 			var input nativeaccess.Policy
 			if err := json.Unmarshal(req.Body, &input); err != nil {

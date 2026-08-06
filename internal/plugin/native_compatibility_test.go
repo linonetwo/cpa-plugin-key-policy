@@ -104,7 +104,8 @@ func TestNativeCanonicalModelAndServerSideCredentialGroup(t *testing.T) {
 		if err := unmarshalOK(rawAuth, &auth); err != nil {
 			t.Fatal(err)
 		}
-		if !auth.Authenticated || auth.Principal != key ||
+		if !auth.Authenticated || auth.Principal == "" ||
+			auth.Principal != auth.Metadata["principal_id"] ||
 			auth.Metadata["key_hash"] != nativeaccess.HashKey(key) {
 			t.Fatalf("unexpected auth for %q: %#v", requested, auth)
 		}

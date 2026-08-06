@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  continueNativeRotation,
   listApiKeyAliases,
   listNativeIdentities,
   listNativePolicies,
@@ -36,6 +37,9 @@ export default function NativeAccess() {
   const [aliases, setAliases] = useState<ApiKeyAlias[]>([]);
   const [classifyRules, setClassifyRules] = useState<ClassifyRule[]>([]);
   const [editing, setEditing] = useState<NativePolicy | null>(null);
+  const [rotationTarget, setRotationTarget] = useState<NativeIdentity | null>(null);
+  const [rotationSource, setRotationSource] = useState("");
+  const [rotating, setRotating] = useState(false);
   const [toggling, setToggling] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -68,12 +72,41 @@ export default function NativeAccess() {
   useEffect(() => { void load(); }, [load]);
 
   const edit = (identity: NativeIdentity) => {
-    const current = policies.find((item) => item.key_hash === identity.key_hash);
+    const current = policies.find((item) =>
+      (identity.principal_id && item.principal_id === identity.principal_id) ||
+      item.key_hash === identity.key_hash
+    );
     setEditing(current ? structuredClone(current) : {
       key_hash: identity.key_hash,
       enabled: true,
       grants: [emptyGrant()],
     });
+  };
+
+  const retiredPrincipals = identities.filter((identity) =>
+    identity.managed && identity.active === false && identity.principal_id
+  );
+
+  const beginRotation = (identity: NativeIdentity) => {
+    setRotationTarget(identity);
+    setRotationSource(retiredPrincipals.length === 1 ? retiredPrincipals[0].principal_id ?? "" : "");
+    setError("");
+  };
+
+  const continueRotation = async () => {
+    if (!rotationTarget || !rotationSource) return;
+    setRotating(true);
+    setError("");
+    try {
+      await continueNativeRotation(rotationSource, rotationTarget.key_hash);
+      setRotationTarget(null);
+      setRotationSource("");
+      await load();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRotating(false);
+    }
   };
 
   const togglePolicy = async (policy: NativePolicy) => {
@@ -105,7 +138,10 @@ export default function NativeAccess() {
       {loading ? <div className="muted">{t("keys.loading")}</div> : (
         <div className="card-stack">
           {identities.map((identity) => {
-            const policy = policies.find((item) => item.key_hash === identity.key_hash);
+            const policy = policies.find((item) =>
+              (identity.principal_id && item.principal_id === identity.principal_id) ||
+              item.key_hash === identity.key_hash
+            );
             const alias = nativeIdentityAlias(identity, aliases);
             return (
               <div className="card" key={identity.key_hash}>
@@ -115,7 +151,9 @@ export default function NativeAccess() {
                     {alias && <div className="muted mono">{identity.key_preview}</div>}
                     <div className="muted mono">{identity.key_hash.slice(0, 19)}…</div>
                   </div>
-                  {policy ? (
+                  {identity.active === false ? (
+                    <span className="badge">{t("native.retiredCredential")}</span>
+                  ) : policy ? (
                     <label className="switch" aria-label={policy.enabled ? t("keys.enabled") : t("keys.disabled")}>
                       <input
                         type="checkbox"
@@ -155,7 +193,14 @@ export default function NativeAccess() {
                   </details>
                 )}
                 <div className="native-card-actions">
-                  <button className="btn sm" onClick={() => edit(identity)}>{t("native.edit")}</button>
+                  {identity.active !== false && (
+                    <button className="btn sm" onClick={() => edit(identity)}>{t("native.edit")}</button>
+                  )}
+                  {identity.active !== false && !identity.managed && retiredPrincipals.length > 0 && (
+                    <button className="btn sm primary" onClick={() => beginRotation(identity)}>
+                      {t("native.continueRotation")}
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -170,6 +215,55 @@ export default function NativeAccess() {
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); void load(); }}
         />
+      )}
+      {rotationTarget && (
+        <div className="modal-overlay">
+          <div className="modal native-rotation-modal">
+            <div className="modal-header">
+              <div>
+                <h2>{t("native.rotationTitle")}</h2>
+                <div className="muted">{t("native.rotationHint")}</div>
+              </div>
+            </div>
+            <div className="modal-body">
+              <label>
+                {t("native.newCredential")}
+                <input className="input mono" value={rotationTarget.key_preview} readOnly />
+              </label>
+              <label>
+                {t("native.previousIdentity")}
+                <select
+                  className="input"
+                  value={rotationSource}
+                  onChange={(event) => setRotationSource(event.target.value)}
+                >
+                  <option value="">{t("native.selectPreviousIdentity")}</option>
+                  {retiredPrincipals.map((identity) => {
+                    const alias = nativeIdentityAlias(identity, aliases);
+                    return (
+                      <option value={identity.principal_id} key={identity.principal_id}>
+                        {alias || identity.key_preview || identity.principal_id}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+              <div className="muted">{t("native.rotationAuditHint")}</div>
+            </div>
+            <div className="modal-actions modal-footer">
+              <button className="btn" disabled={rotating} onClick={() => setRotationTarget(null)}>
+                {t("mapping.cancel")}
+              </button>
+              <button
+                className="btn primary"
+                disabled={rotating || !rotationSource}
+                onClick={() => void continueRotation()}
+              >
+                {t("native.confirmRotation")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

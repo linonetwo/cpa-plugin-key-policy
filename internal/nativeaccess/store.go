@@ -1,6 +1,7 @@
 package nativeaccess
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,6 +33,7 @@ type Grant struct {
 }
 
 type Policy struct {
+	PrincipalID  string  `json:"principal_id,omitempty"`
 	KeyHash      string  `json:"key_hash"`
 	Enabled      bool    `json:"enabled"`
 	Grants       []Grant `json:"grants"`
@@ -40,6 +42,14 @@ type Policy struct {
 	WeeklyCalls  int64   `json:"weekly_calls,omitempty"`
 	DailyTokens  int64   `json:"daily_tokens,omitempty"`
 	WeeklyTokens int64   `json:"weekly_tokens,omitempty"`
+}
+
+type Credential struct {
+	KeyHash     string     `json:"key_hash"`
+	PrincipalID string     `json:"principal_id"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"created_at"`
+	RetiredAt   *time.Time `json:"retired_at,omitempty"`
 }
 
 type window struct {
@@ -54,16 +64,22 @@ type usage struct {
 }
 
 type state struct {
-	Version  int               `json:"version"`
-	Policies []Policy          `json:"policies"`
-	Usage    map[string]*usage `json:"usage,omitempty"`
+	Version     int               `json:"version"`
+	Policies    []Policy          `json:"policies"`
+	Usage       map[string]*usage `json:"usage,omitempty"`
+	Principals  []Policy          `json:"principals,omitempty"`
+	Credentials []Credential      `json:"credentials,omitempty"`
 }
 
 type Identity struct {
-	KeyHash     string `json:"key_hash"`
-	CallerScope string `json:"caller_scope"`
-	Preview     string `json:"key_preview"`
-	Managed     bool   `json:"managed"`
+	PrincipalID      string `json:"principal_id,omitempty"`
+	KeyHash          string `json:"key_hash"`
+	CredentialHash   string `json:"credential_hash"`
+	CallerScope      string `json:"caller_scope"`
+	Preview          string `json:"key_preview"`
+	Managed          bool   `json:"managed"`
+	Active           bool   `json:"active"`
+	CredentialStatus string `json:"credential_status"`
 }
 
 type Decision struct {
@@ -89,22 +105,23 @@ type nativeConfig struct {
 }
 
 type Store struct {
-	mu             sync.Mutex
-	keysFile       string
-	stateFile      string
-	keysModTime    int64
-	keysSize       int64
-	stateModTime   int64
-	stateSize      int64
-	activeByHash   map[string]string
-	scopeByHash    map[string]string
-	policiesByHash map[string]Policy
-	usageByHash    map[string]*usage
-	rpm            map[string][]time.Time
-	now            func() time.Time
-	dirty          bool
-	lastFlush      time.Time
-	flushScheduled bool
+	mu                sync.Mutex
+	keysFile          string
+	stateFile         string
+	keysModTime       int64
+	keysSize          int64
+	stateModTime      int64
+	stateSize         int64
+	activeByHash      map[string]string
+	scopeByHash       map[string]string
+	policiesByHash    map[string]Policy
+	credentialsByHash map[string]Credential
+	usageByHash       map[string]*usage
+	rpm               map[string][]time.Time
+	now               func() time.Time
+	dirty             bool
+	lastFlush         time.Time
+	flushScheduled    bool
 }
 
 func New(keysFile, stateFile string) (*Store, error) {
@@ -117,14 +134,15 @@ func New(keysFile, stateFile string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{
-		keysFile:       keysFile,
-		stateFile:      stateFile,
-		activeByHash:   make(map[string]string),
-		scopeByHash:    make(map[string]string),
-		policiesByHash: make(map[string]Policy),
-		usageByHash:    make(map[string]*usage),
-		rpm:            make(map[string][]time.Time),
-		now:            time.Now,
+		keysFile:          keysFile,
+		stateFile:         stateFile,
+		activeByHash:      make(map[string]string),
+		scopeByHash:       make(map[string]string),
+		policiesByHash:    make(map[string]Policy),
+		credentialsByHash: make(map[string]Credential),
+		usageByHash:       make(map[string]*usage),
+		rpm:               make(map[string][]time.Time),
+		now:               time.Now,
 	}
 	if err := s.loadStateLocked(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -164,11 +182,45 @@ func PreviewKey(key string) string {
 	return key[:7] + "..." + key[len(key)-5:]
 }
 
+func newPrincipalID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	raw[6] = (raw[6] & 0x0f) | 0x40
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("principal_%08x-%04x-%04x-%04x-%012x",
+		raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16]), nil
+}
+
+func legacyPrincipalID(keyHash string) string {
+	sum := sha256.Sum256([]byte("cpa-key-policy:principal:v1\x00" + keyHash))
+	raw := sum[:16]
+	raw[6] = (raw[6] & 0x0f) | 0x50
+	raw[8] = (raw[8] & 0x3f) | 0x80
+	return fmt.Sprintf("principal_%08x-%04x-%04x-%04x-%012x",
+		raw[0:4], raw[4:6], raw[6:8], raw[8:10], raw[10:16])
+}
+
 func normalizePolicy(input Policy) (Policy, error) {
+	input.PrincipalID = strings.TrimSpace(input.PrincipalID)
 	input.KeyHash = strings.ToLower(strings.TrimSpace(input.KeyHash))
 	if !strings.HasPrefix(input.KeyHash, hashPrefix) || len(input.KeyHash) != len(hashPrefix)+64 {
 		return Policy{}, errors.New("key_hash must be a sha256 hash")
 	}
+	return normalizePolicyRules(input)
+}
+
+func normalizePrincipalPolicy(input Policy) (Policy, error) {
+	input.PrincipalID = strings.TrimSpace(input.PrincipalID)
+	if input.PrincipalID == "" {
+		return Policy{}, errors.New("principal_id is required")
+	}
+	input.KeyHash = ""
+	return normalizePolicyRules(input)
+}
+
+func normalizePolicyRules(input Policy) (Policy, error) {
 	if input.RPM < 0 || input.DailyCalls < 0 || input.WeeklyCalls < 0 ||
 		input.DailyTokens < 0 || input.WeeklyTokens < 0 {
 		return Policy{}, errors.New("quotas cannot be negative")
@@ -448,17 +500,64 @@ func (s *Store) loadStateLocked() error {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return fmt.Errorf("parse native policy state: %w", err)
 	}
-	nextPolicies := make(map[string]Policy, len(data.Policies))
-	for _, input := range data.Policies {
-		policy, err := normalizePolicy(input)
+	inputPolicies := data.Principals
+	legacy := len(inputPolicies) == 0 && len(data.Policies) > 0
+	if legacy {
+		inputPolicies = data.Policies
+	}
+	principals := make(map[string]Policy, len(inputPolicies))
+	for _, input := range inputPolicies {
+		if input.PrincipalID == "" {
+			input.PrincipalID = legacyPrincipalID(input.KeyHash)
+		}
+		var policy Policy
+		var err error
+		if legacy {
+			policy, err = normalizePolicy(input)
+		} else {
+			policy, err = normalizePrincipalPolicy(input)
+		}
 		if err != nil {
 			return err
 		}
-		nextPolicies[policy.KeyHash] = policy
+		principals[policy.PrincipalID] = policy
+	}
+	credentials := make(map[string]Credential)
+	if legacy {
+		for _, policy := range principals {
+			credentials[policy.KeyHash] = Credential{
+				KeyHash: policy.KeyHash, PrincipalID: policy.PrincipalID,
+				Status: "active", CreatedAt: time.Now().UTC(),
+			}
+		}
+	} else {
+		for _, credential := range data.Credentials {
+			credential.KeyHash = strings.ToLower(strings.TrimSpace(credential.KeyHash))
+			credential.PrincipalID = strings.TrimSpace(credential.PrincipalID)
+			if _, ok := principals[credential.PrincipalID]; !ok {
+				return fmt.Errorf("credential %s references unknown principal", credential.KeyHash)
+			}
+			credentials[credential.KeyHash] = credential
+		}
+	}
+	nextPolicies := make(map[string]Policy, len(credentials))
+	for hash, credential := range credentials {
+		policy := principals[credential.PrincipalID]
+		policy.KeyHash = hash
+		nextPolicies[hash] = policy
 	}
 	s.policiesByHash = nextPolicies
+	s.credentialsByHash = credentials
 	if data.Usage != nil {
-		mergeUsageMaps(s.usageByHash, data.Usage)
+		if legacy {
+			for hash, value := range data.Usage {
+				if credential, ok := credentials[hash]; ok {
+					mergeUsageMaps(s.usageByHash, map[string]*usage{credential.PrincipalID: value})
+				}
+			}
+		} else {
+			mergeUsageMaps(s.usageByHash, data.Usage)
+		}
 	}
 	if info, statErr := os.Stat(s.stateFile); statErr == nil {
 		s.stateModTime = info.ModTime().UnixNano()
@@ -468,12 +567,27 @@ func (s *Store) loadStateLocked() error {
 }
 
 func (s *Store) saveLocked() error {
-	policies := make([]Policy, 0, len(s.policiesByHash))
-	for _, policy := range s.policiesByHash {
-		policies = append(policies, policy)
+	principalMap := make(map[string]Policy)
+	for hash, policy := range s.policiesByHash {
+		credential, ok := s.credentialsByHash[hash]
+		if !ok {
+			continue
+		}
+		policy.PrincipalID = credential.PrincipalID
+		policy.KeyHash = ""
+		principalMap[policy.PrincipalID] = policy
 	}
-	sort.Slice(policies, func(i, j int) bool { return policies[i].KeyHash < policies[j].KeyHash })
-	raw, err := json.MarshalIndent(state{Version: 1, Policies: policies, Usage: s.usageByHash}, "", "  ")
+	principals := make([]Policy, 0, len(principalMap))
+	for _, policy := range principalMap {
+		principals = append(principals, policy)
+	}
+	sort.Slice(principals, func(i, j int) bool { return principals[i].PrincipalID < principals[j].PrincipalID })
+	credentials := make([]Credential, 0, len(s.credentialsByHash))
+	for _, credential := range s.credentialsByHash {
+		credentials = append(credentials, credential)
+	}
+	sort.Slice(credentials, func(i, j int) bool { return credentials[i].KeyHash < credentials[j].KeyHash })
+	raw, err := json.MarshalIndent(state{Version: 2, Principals: principals, Credentials: credentials, Usage: s.usageByHash}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -481,11 +595,26 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	temp := s.stateFile + ".tmp"
-	if err := os.WriteFile(temp, raw, 0o600); err != nil {
+	file, err := os.OpenFile(temp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
 		return err
+	}
+	if _, err = file.Write(raw); err == nil {
+		err = file.Sync()
+	}
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if err := os.Rename(temp, s.stateFile); err != nil {
 		return err
+	}
+	if dir, err := os.Open(filepath.Dir(s.stateFile)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	if info, statErr := os.Stat(s.stateFile); statErr == nil {
 		s.stateModTime = info.ModTime().UnixNano()
@@ -579,15 +708,36 @@ func (s *Store) Identities() ([]Identity, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]Identity, 0, len(s.activeByHash))
+	out := make([]Identity, 0, len(s.activeByHash)+len(s.credentialsByHash))
+	seenPrincipals := make(map[string]bool)
 	for hash, preview := range s.activeByHash {
-		_, managed := s.policiesByHash[hash]
+		policy, managed := s.policiesByHash[hash]
+		principalID := policy.PrincipalID
+		status := "unmanaged"
+		if managed {
+			status = "active"
+			seenPrincipals[principalID] = true
+		}
 		out = append(out, Identity{
-			KeyHash:     hash,
-			CallerScope: s.scopeByHash[hash],
-			Preview:     preview,
-			Managed:     managed,
+			PrincipalID:      principalID,
+			KeyHash:          hash,
+			CredentialHash:   hash,
+			CallerScope:      s.scopeByHash[hash],
+			Preview:          preview,
+			Managed:          managed,
+			Active:           true,
+			CredentialStatus: status,
 		})
+	}
+	for hash, credential := range s.credentialsByHash {
+		if _, active := s.activeByHash[hash]; active || seenPrincipals[credential.PrincipalID] {
+			continue
+		}
+		out = append(out, Identity{
+			PrincipalID: credential.PrincipalID, KeyHash: hash, CredentialHash: hash,
+			Managed: true, Active: false, CredentialStatus: "retired",
+		})
+		seenPrincipals[credential.PrincipalID] = true
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].KeyHash < out[j].KeyHash })
 	return out, nil
@@ -595,13 +745,51 @@ func (s *Store) Identities() ([]Identity, error) {
 
 func (s *Store) Policies() []Policy {
 	_ = s.refreshState()
+	_ = s.refreshKeys()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Policy, 0, len(s.policiesByHash))
-	for _, policy := range s.policiesByHash {
-		out = append(out, policy)
+	hashes := make([]string, 0, len(s.policiesByHash))
+	for hash := range s.policiesByHash {
+		hashes = append(hashes, hash)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].KeyHash < out[j].KeyHash })
+	sort.Strings(hashes)
+	seen := make(map[string]bool)
+	for _, activeOnly := range []bool{true, false} {
+		for _, hash := range hashes {
+			policy := s.policiesByHash[hash]
+			_, active := s.activeByHash[hash]
+			if active != activeOnly || seen[policy.PrincipalID] {
+				continue
+			}
+			policy.KeyHash = hash
+			seen[policy.PrincipalID] = true
+			out = append(out, policy)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].PrincipalID < out[j].PrincipalID })
+	return out
+}
+
+func (s *Store) Credentials(principalID string) []Credential {
+	_ = s.refreshState()
+	_ = s.refreshKeys()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Credential, 0)
+	for hash, credential := range s.credentialsByHash {
+		if principalID != "" && credential.PrincipalID != principalID {
+			continue
+		}
+		if _, active := s.activeByHash[hash]; active {
+			credential.Status = "active"
+			credential.RetiredAt = nil
+		} else {
+			credential.Status = "retired"
+		}
+		out = append(out, credential)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
 }
 
@@ -643,30 +831,73 @@ func (s *Store) Apply(inputs []Policy, replace, dryRun bool) ([]Policy, error) {
 	if err := s.refreshStateLocked(true); err != nil {
 		return nil, err
 	}
-	for _, policy := range normalized {
+	for i := range normalized {
+		policy := &normalized[i]
 		if _, active := s.activeByHash[policy.KeyHash]; !active {
 			return nil, fmt.Errorf("%s is not an active CPA api-key", policy.KeyHash)
+		}
+		if credential, exists := s.credentialsByHash[policy.KeyHash]; exists {
+			if policy.PrincipalID != "" && policy.PrincipalID != credential.PrincipalID {
+				return nil, fmt.Errorf("%s already belongs to %s", policy.KeyHash, credential.PrincipalID)
+			}
+			policy.PrincipalID = credential.PrincipalID
+		} else if policy.PrincipalID == "" {
+			principalID, idErr := newPrincipalID()
+			if idErr != nil {
+				return nil, idErr
+			}
+			policy.PrincipalID = principalID
 		}
 	}
 	if dryRun {
 		return normalized, nil
 	}
-	next := s.policiesByHash
-	if replace {
-		next = make(map[string]Policy, len(normalized))
-	} else {
-		next = make(map[string]Policy, len(s.policiesByHash)+len(normalized))
+	next := make(map[string]Policy, len(s.policiesByHash)+len(normalized))
+	nextCredentials := make(map[string]Credential, len(s.credentialsByHash)+len(normalized))
+	if !replace {
 		for hash, policy := range s.policiesByHash {
 			next[hash] = policy
 		}
+		for hash, credential := range s.credentialsByHash {
+			nextCredentials[hash] = credential
+		}
+	}
+	templates := make(map[string]Policy, len(normalized))
+	for _, policy := range normalized {
+		templates[policy.PrincipalID] = policy
+		if _, exists := nextCredentials[policy.KeyHash]; !exists {
+			nextCredentials[policy.KeyHash] = Credential{
+				KeyHash: policy.KeyHash, PrincipalID: policy.PrincipalID,
+				Status: "active", CreatedAt: s.now().UTC(),
+			}
+		}
+	}
+	// Policies belong to a stable principal, not to one credential version.
+	// Preserve retired credential history for principals that remain in a full
+	// replacement, and apply an edited policy to every credential version.
+	for hash, credential := range s.credentialsByHash {
+		template, updated := templates[credential.PrincipalID]
+		if !updated {
+			if replace {
+				continue
+			}
+			continue
+		}
+		nextCredentials[hash] = credential
+		template.KeyHash = hash
+		next[hash] = template
 	}
 	for _, policy := range normalized {
+		policy.KeyHash = strings.ToLower(strings.TrimSpace(policy.KeyHash))
 		next[policy.KeyHash] = policy
 	}
 	previous := s.policiesByHash
+	previousCredentials := s.credentialsByHash
 	s.policiesByHash = next
+	s.credentialsByHash = nextCredentials
 	if err := s.saveLocked(); err != nil {
 		s.policiesByHash = previous
+		s.credentialsByHash = previousCredentials
 		return nil, err
 	}
 	return normalized, nil
@@ -684,10 +915,149 @@ func (s *Store) Delete(hash string) error {
 	if err := s.refreshStateLocked(true); err != nil {
 		return err
 	}
-	delete(s.policiesByHash, hash)
-	delete(s.usageByHash, hash)
-	delete(s.rpm, hash)
+	if credential, ok := s.credentialsByHash[hash]; ok {
+		for credentialHash, item := range s.credentialsByHash {
+			if item.PrincipalID == credential.PrincipalID {
+				delete(s.credentialsByHash, credentialHash)
+				delete(s.policiesByHash, credentialHash)
+			}
+		}
+		delete(s.usageByHash, credential.PrincipalID)
+		delete(s.rpm, credential.PrincipalID)
+	}
 	return s.saveLocked()
+}
+
+func (s *Store) ContinueRotation(principalID, newKeyHash string) error {
+	principalID = strings.TrimSpace(principalID)
+	newKeyHash = strings.ToLower(strings.TrimSpace(newKeyHash))
+	if principalID == "" {
+		return errors.New("principal_id is required")
+	}
+	if !strings.HasPrefix(newKeyHash, hashPrefix) || len(newKeyHash) != len(hashPrefix)+64 {
+		return errors.New("new_key_hash must be a sha256 hash")
+	}
+	if err := s.refreshKeys(); err != nil {
+		return err
+	}
+	release, err := acquireFileLock(s.stateFile)
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateLocked(true); err != nil {
+		return err
+	}
+	if _, active := s.activeByHash[newKeyHash]; !active {
+		return errors.New("new credential is not an active CPA api-key")
+	}
+	if _, managed := s.credentialsByHash[newKeyHash]; managed {
+		return errors.New("new credential is already managed")
+	}
+	var template Policy
+	found := false
+	hasRetired := false
+	for hash, credential := range s.credentialsByHash {
+		if credential.PrincipalID != principalID {
+			continue
+		}
+		template = s.policiesByHash[hash]
+		found = true
+		if _, active := s.activeByHash[hash]; !active {
+			hasRetired = true
+		}
+	}
+	if !found {
+		return errors.New("principal not found")
+	}
+	if !hasRetired {
+		return errors.New("principal has no retired credential to continue")
+	}
+	previousPolicies := clonePolicyMap(s.policiesByHash)
+	previousCredentials := cloneCredentialMap(s.credentialsByHash)
+	now := s.now().UTC()
+	for hash, credential := range s.credentialsByHash {
+		if credential.PrincipalID != principalID {
+			continue
+		}
+		if _, active := s.activeByHash[hash]; !active {
+			credential.Status = "retired"
+			if credential.RetiredAt == nil {
+				credential.RetiredAt = &now
+			}
+			s.credentialsByHash[hash] = credential
+		}
+	}
+	template.KeyHash = newKeyHash
+	template.PrincipalID = principalID
+	s.policiesByHash[newKeyHash] = template
+	s.credentialsByHash[newKeyHash] = Credential{
+		KeyHash: newKeyHash, PrincipalID: principalID, Status: "active", CreatedAt: now,
+	}
+	if err := s.saveLocked(); err != nil {
+		s.policiesByHash = previousPolicies
+		s.credentialsByHash = previousCredentials
+		return err
+	}
+	return nil
+}
+
+func (s *Store) UndoRotation(principalID, newKeyHash string) error {
+	principalID = strings.TrimSpace(principalID)
+	newKeyHash = strings.ToLower(strings.TrimSpace(newKeyHash))
+	if err := s.refreshKeys(); err != nil {
+		return err
+	}
+	release, err := acquireFileLock(s.stateFile)
+	if err != nil {
+		return err
+	}
+	defer release()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.refreshStateLocked(true); err != nil {
+		return err
+	}
+	credential, ok := s.credentialsByHash[newKeyHash]
+	if !ok || credential.PrincipalID != principalID {
+		return errors.New("rotation binding not found")
+	}
+	if _, active := s.activeByHash[newKeyHash]; !active {
+		return errors.New("new credential is no longer active")
+	}
+	previousPolicies := clonePolicyMap(s.policiesByHash)
+	previousCredentials := cloneCredentialMap(s.credentialsByHash)
+	delete(s.credentialsByHash, newKeyHash)
+	delete(s.policiesByHash, newKeyHash)
+	if err := s.saveLocked(); err != nil {
+		s.policiesByHash = previousPolicies
+		s.credentialsByHash = previousCredentials
+		return err
+	}
+	return nil
+}
+
+func clonePolicyMap(input map[string]Policy) map[string]Policy {
+	out := make(map[string]Policy, len(input))
+	for hash, policy := range input {
+		policy.Grants = append([]Grant(nil), policy.Grants...)
+		out[hash] = policy
+	}
+	return out
+}
+
+func cloneCredentialMap(input map[string]Credential) map[string]Credential {
+	out := make(map[string]Credential, len(input))
+	for hash, credential := range input {
+		if credential.RetiredAt != nil {
+			retiredAt := *credential.RetiredAt
+			credential.RetiredAt = &retiredAt
+		}
+		out[hash] = credential
+	}
+	return out
 }
 
 func resetWindows(u *usage, now time.Time) {
@@ -715,16 +1085,16 @@ func (s *Store) Authenticate(rawKey, model string, modelsEndpoint bool) Decision
 		return Decision{Reason: "unknown_native_key"}
 	}
 	decision := Decision{
-		Known:     true,
-		Principal: strings.TrimSpace(rawKey),
-		KeyHash:   hash,
-		Model:     model,
+		Known:   true,
+		KeyHash: hash,
+		Model:   model,
 	}
 	policy, exists := s.policiesByHash[hash]
 	if !exists {
 		decision.Reason = "policy_missing"
 		return decision
 	}
+	decision.Principal = policy.PrincipalID
 	if !policy.Enabled {
 		decision.Reason = "policy_disabled"
 		return decision
@@ -745,10 +1115,10 @@ func (s *Store) Authenticate(rawKey, model string, modelsEndpoint bool) Decision
 	decision.TargetModel = route.TargetModel
 	decision.Group = route.Group
 	now := s.now()
-	u := s.usageByHash[hash]
+	u := s.usageByHash[policy.PrincipalID]
 	if u == nil {
 		u = &usage{}
-		s.usageByHash[hash] = u
+		s.usageByHash[policy.PrincipalID] = u
 	}
 	resetWindows(u, now)
 	if policy.DailyCalls > 0 && u.Daily.Calls >= policy.DailyCalls {
@@ -769,18 +1139,18 @@ func (s *Store) Authenticate(rawKey, model string, modelsEndpoint bool) Decision
 	}
 	if policy.RPM > 0 {
 		cutoff := now.Add(-time.Minute)
-		recent := s.rpm[hash][:0]
-		for _, at := range s.rpm[hash] {
+		recent := s.rpm[policy.PrincipalID][:0]
+		for _, at := range s.rpm[policy.PrincipalID] {
 			if at.After(cutoff) {
 				recent = append(recent, at)
 			}
 		}
 		if len(recent) >= policy.RPM {
-			s.rpm[hash] = recent
+			s.rpm[policy.PrincipalID] = recent
 			decision.Reason = "rpm_exceeded"
 			return decision
 		}
-		s.rpm[hash] = append(recent, now)
+		s.rpm[policy.PrincipalID] = append(recent, now)
 	}
 	u.Daily.Calls++
 	u.Weekly.Calls++
@@ -811,7 +1181,7 @@ func (s *Store) Route(rawKey, model string) (Decision, bool) {
 	}
 	decision := routeDecision(policy, model)
 	decision.Known = true
-	decision.Principal = strings.TrimSpace(rawKey)
+	decision.Principal = policy.PrincipalID
 	decision.KeyHash = hash
 	return decision, decision.Allowed
 }
@@ -962,11 +1332,15 @@ func (s *Store) RecordUsage(rawKey string, tokens int64) {
 	if _, active := s.activeByHash[hash]; !active {
 		return
 	}
+	policy, managed := s.policiesByHash[hash]
+	if !managed {
+		return
+	}
 	now := s.now()
-	u := s.usageByHash[hash]
+	u := s.usageByHash[policy.PrincipalID]
 	if u == nil {
 		u = &usage{}
-		s.usageByHash[hash] = u
+		s.usageByHash[policy.PrincipalID] = u
 	}
 	resetWindows(u, now)
 	u.Daily.Tokens += tokens

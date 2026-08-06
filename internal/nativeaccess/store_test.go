@@ -3,6 +3,7 @@ package nativeaccess
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -436,5 +437,80 @@ func TestPolicyHotReloadAcrossPluginInstances(t *testing.T) {
 	}
 	if got := reader.Authenticate(key, "gpt-5.6-sol", false); got.Allowed || got.Reason != "policy_missing" {
 		t.Fatalf("reader retained deleted policy: %#v", got)
+	}
+}
+
+func TestNativeKeyRotationKeepsStablePrincipalAndHistory(t *testing.T) {
+	dir := t.TempDir()
+	keysFile := filepath.Join(dir, "config.yaml")
+	stateFile := filepath.Join(dir, "state.json")
+	const oldKey = "sk-rotation-old"
+	const newKey = "sk-rotation-new"
+	if err := os.WriteFile(keysFile, []byte("api-keys:\n  - "+oldKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := New(keysFile, stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Upsert(Policy{
+		KeyHash: HashKey(oldKey),
+		Enabled: true,
+		Grants:  []Grant{{Provider: "codex", Model: "gpt-5.6-sol"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := store.Authenticate(oldKey, "gpt-5.6-sol", false)
+	if !before.Allowed || before.Principal == "" {
+		t.Fatalf("old credential was not authorized: %#v", before)
+	}
+
+	if err = os.WriteFile(keysFile, []byte("api-keys:\n  - "+newKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if unbound := store.Authenticate(newKey, "gpt-5.6-sol", false); !unbound.Known || unbound.Allowed || unbound.Reason != "policy_missing" {
+		t.Fatalf("new native key must fail closed before explicit continuation: %#v", unbound)
+	}
+	if err = store.ContinueRotation(before.Principal, HashKey(newKey)); err != nil {
+		t.Fatal(err)
+	}
+	after := store.Authenticate(newKey, "gpt-5.6-sol", false)
+	if !after.Allowed || after.Principal != before.Principal {
+		t.Fatalf("rotation did not retain principal: before=%#v after=%#v", before, after)
+	}
+	credentials := store.Credentials(before.Principal)
+	if len(credentials) != 2 {
+		t.Fatalf("credential history length=%d want=2: %#v", len(credentials), credentials)
+	}
+	status := map[string]string{}
+	for _, credential := range credentials {
+		status[credential.KeyHash] = credential.Status
+	}
+	if status[HashKey(oldKey)] != "retired" || status[HashKey(newKey)] != "active" {
+		t.Fatalf("unexpected credential statuses: %#v", status)
+	}
+
+	reloaded, err := New(keysFile, stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Authenticate(newKey, "gpt-5.6-sol", false)
+	if !got.Allowed || got.Principal != before.Principal {
+		t.Fatalf("persisted rotation did not reload: %#v", got)
+	}
+	raw, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct {
+		Version     int          `json:"version"`
+		Principals  []Policy     `json:"principals"`
+		Credentials []Credential `json:"credentials"`
+	}
+	if err = json.Unmarshal(raw, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Version != 2 || len(persisted.Principals) != 1 || len(persisted.Credentials) != 2 {
+		t.Fatalf("unexpected persisted rotation state: %#v", persisted)
 	}
 }

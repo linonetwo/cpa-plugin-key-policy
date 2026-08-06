@@ -155,6 +155,27 @@ Notes:
 - Prefer creating keys and aliases in the **Web UI** or Management API; seed YAML `keys` is mainly for first boot.
 - Never commit real key hashes, management secrets, or live host URLs into public docs.
 
+#### Native key rotation
+
+Native-access state uses a plugin-owned, random `principal_id` as the durable
+caller identity. A SHA-256 credential fingerprint is only one version of that
+identity. Policies, quotas, and counters belong to the principal; plaintext
+keys are never stored.
+
+Rotation is intentionally explicit and fail-closed:
+
+1. Rotate or replace the plaintext key in CPA's original `api-keys` panel.
+2. The new key appears here as **unmanaged** and cannot call a model yet.
+3. Click **Continue rotation**, then select the retired identity it replaces.
+4. The new fingerprint becomes active under the same principal. The old
+   fingerprint remains as immutable audit history.
+
+The state file is migrated online from the legacy hash-keyed schema to version
+2 (`principals` plus `credentials`). Full policy replacements preserve retired
+credential versions for every principal that remains. Management automation can
+use `GET …/credentials` and `POST …/rotations`; it should never infer a
+rotation merely because one key disappeared and another appeared.
+
 ---
 
 ## Web Management UI

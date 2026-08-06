@@ -30,3 +30,13 @@ export async function listApiKeyAliases(): Promise<ApiKeyAlias[]> {
 export async function saveNativePolicy(policy: NativePolicy): Promise<void> {
   await apiClient().put(pluginPath("/policies"), policy);
 }
+
+export async function continueNativeRotation(
+  principalId: string,
+  newKeyHash: string,
+): Promise<void> {
+  await apiClient().post(pluginPath("/rotations"), {
+    principal_id: principalId,
+    new_key_hash: newKeyHash,
+  });
+}

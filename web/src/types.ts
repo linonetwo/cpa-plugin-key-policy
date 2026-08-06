@@ -144,9 +144,13 @@ export interface StatusResponse {
 }
 
 export interface NativeIdentity {
+  principal_id?: string;
   key_hash: string;
+  credential_hash?: string;
   key_preview: string;
   managed: boolean;
+  active?: boolean;
+  credential_status?: "active" | "retired" | "unmanaged" | string;
 }
 
 // CPAMP owns the human-readable name for a CPA native API key. The plugin
@@ -166,6 +170,7 @@ export interface NativeGrant {
 }
 
 export interface NativePolicy {
+  principal_id?: string;
   key_hash: string;
   enabled: boolean;
   grants: NativeGrant[];
