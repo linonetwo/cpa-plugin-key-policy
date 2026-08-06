@@ -454,7 +454,7 @@ func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
 	if len(eligible) == 0 {
 		return ErrorEnvelope("auth_not_found", "cpa-key-policy: no eligible auth candidate for key policy", http.StatusServiceUnavailable), nil
 	}
-	if len(eligible) == len(usable) {
+	if len(eligibleUsable) == len(usable) {
 		// The policy did not remove any usable candidate. Preserve CPA's own
 		// fill-first/round-robin/priority/session-affinity behavior.
 		return OKEnvelope(SchedulerPickResponse{Handled: false})
