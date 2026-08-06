@@ -633,13 +633,27 @@ func schedulerMetadataString(meta map[string]any, key string) string {
 	}
 	raw, ok := meta[key]
 	if !ok || raw == nil {
-		return ""
+		raw = nestedSchedulerMetadataValue(meta["frontend_auth_metadata"], key)
+		if raw == nil {
+			return ""
+		}
 	}
 	switch v := raw.(type) {
 	case string:
 		return strings.ToLower(strings.TrimSpace(v))
 	default:
 		return strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", v)))
+	}
+}
+
+func nestedSchedulerMetadataValue(raw any, key string) any {
+	switch values := raw.(type) {
+	case map[string]any:
+		return values[key]
+	case map[string]string:
+		return values[key]
+	default:
+		return nil
 	}
 }
 

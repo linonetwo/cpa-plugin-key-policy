@@ -124,7 +124,7 @@ func TestNativeSchedulerRecoversKeyIdentityFromRequestHeaders(t *testing.T) {
 			Headers: map[string][]string{
 				"Authorization": {"Bearer sk-server-side-routing"},
 			},
-			// Match production: CPA currently does not propagate the
+			// Backward compatibility for CPA versions that do not propagate
 			// FrontendAuthResponse metadata into scheduler metadata.
 			Metadata: map[string]any{
 				"requested_model": "gpt-5.6-sol",
@@ -152,6 +152,55 @@ func TestNativeSchedulerRecoversKeyIdentityFromRequestHeaders(t *testing.T) {
 	}
 	if !response.Handled || response.AuthID != "codex-csil.json" {
 		t.Fatalf("request header identity must enforce CSiL-only selection, response=%#v", response)
+	}
+}
+
+func TestNativeSchedulerUsesNamespacedFrontendAuthMetadataForPrefixedRetry(t *testing.T) {
+	app, keyHash := configureNativeSchedulerApp(t, []nativeaccess.Grant{
+		{
+			Provider:       "codex",
+			Model:          "gpt-5.6-sol",
+			Group:          "classify:dongwu",
+			UpstreamPrefix: "codex-dongwu",
+		},
+		{
+			Provider:       "codex",
+			Model:          "gpt-5.6-sol",
+			Group:          "classify:csil",
+			UpstreamPrefix: "codex-csil",
+		},
+	})
+	request, _ := json.Marshal(SchedulerPickRequest{
+		// Execution retries may already carry the canonical upstream model.
+		Model: "gpt-5.6-sol",
+		Options: SchedulerPickOptions{Metadata: map[string]any{
+			"frontend_auth_metadata": map[string]string{
+				"key_hash":        keyHash,
+				"requested_model": "codex-csil/gpt-5.6-sol",
+			},
+		}},
+		Candidates: []SchedulerAuthCandidate{
+			{ID: "codex-dongwu.json", Provider: "codex", Status: "active"},
+			{ID: "codex-csil.json", Provider: "codex", Status: "unavailable"},
+		},
+	})
+	raw, err := app.HandleMethod(MethodSchedulerPick, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !envelope.OK {
+		t.Fatalf("expected successful policy selection, envelope=%#v", envelope)
+	}
+	var response SchedulerPickResponse
+	if err := json.Unmarshal(envelope.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Handled || response.AuthID != "codex-csil.json" {
+		t.Fatalf("prefixed retry crossed credential groups: response=%#v", response)
 	}
 }
 
