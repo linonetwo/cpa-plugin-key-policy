@@ -431,11 +431,12 @@ func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
 
 	usable := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
 	eligible := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
+	eligibleUsable := make([]SchedulerAuthCandidate, 0, len(req.Candidates))
 	for _, candidate := range req.Candidates {
-		if !schedulerCandidateUsable(candidate.Status) {
-			continue
+		currentlyUsable := schedulerCandidateUsable(candidate.Status)
+		if currentlyUsable {
+			usable = append(usable, candidate)
 		}
-		usable = append(usable, candidate)
 		for _, grant := range grants {
 			if !nativeaccess.ProviderMatchesCandidate(grant.Provider, candidate.Provider) {
 				continue
@@ -444,6 +445,9 @@ func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
 				continue
 			}
 			eligible = append(eligible, candidate)
+			if currentlyUsable {
+				eligibleUsable = append(eligibleUsable, candidate)
+			}
 			break
 		}
 	}
@@ -456,8 +460,17 @@ func (a *App) pickNativeScheduler(req SchedulerPickRequest) ([]byte, error) {
 		return OKEnvelope(SchedulerPickResponse{Handled: false})
 	}
 
-	best := eligible[0]
-	for _, candidate := range eligible[1:] {
+	// Authorization and transient health are separate concerns. Prefer a
+	// currently usable authorized credential, but if all authorized credentials
+	// are temporarily unavailable still select one and let CPA's availability
+	// layer return/wait on the real runtime condition. Treating transient health
+	// as missing authorization creates false policy 503s after proxy failures.
+	selectionPool := eligibleUsable
+	if len(selectionPool) == 0 {
+		selectionPool = eligible
+	}
+	best := selectionPool[0]
+	for _, candidate := range selectionPool[1:] {
 		if candidate.Priority > best.Priority ||
 			(candidate.Priority == best.Priority && candidate.ID < best.ID) {
 			best = candidate

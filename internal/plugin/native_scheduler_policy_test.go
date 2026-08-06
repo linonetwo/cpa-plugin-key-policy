@@ -97,6 +97,21 @@ func TestNativeSchedulerLocksKeyToOneCredentialGroup(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerKeepsAuthorizedCredentialWhenTransientlyUnavailable(t *testing.T) {
+	app, keyHash := configureNativeSchedulerApp(t, []nativeaccess.Grant{{
+		Provider: "codex",
+		Model:    "gpt-5.6-sol",
+		Group:    "classify:csil",
+	}})
+	response, envelope := runNativeScheduler(t, app, keyHash, []SchedulerAuthCandidate{
+		{ID: "codex-dongwu.json", Provider: "codex", Status: "active"},
+		{ID: "codex-csil.json", Provider: "codex", Status: "unavailable"},
+	})
+	if !envelope.OK || !response.Handled || response.AuthID != "codex-csil.json" {
+		t.Fatalf("transient health must not erase CSiL authorization, response=%#v envelope=%#v", response, envelope)
+	}
+}
+
 func TestNativeSchedulerRecoversKeyIdentityFromRequestHeaders(t *testing.T) {
 	app, _ := configureNativeSchedulerApp(t, []nativeaccess.Grant{{
 		Provider: "codex",
